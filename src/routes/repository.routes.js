@@ -18,6 +18,8 @@ export function createRepositoryRouter(dependencies) {
       res.status(429).json({ error: { code: 'RATE_LIMITED', message: 'Too many requests. Try again shortly.' } });
     }
   });
+  router.post('/:repositoryId/index', originCheck, auth, importLimit, controller.startIndexing);
+  router.get('/:repositoryId/indexing-status', auth, controller.indexingStatus);
   router.post('/import', originCheck, auth, importLimit, controller.import);
   router.get('/', auth, controller.list);
   return router;

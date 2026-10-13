@@ -17,6 +17,7 @@ model User {
   createdAt      DateTime           @default(now())
   updatedAt      DateTime           @updatedAt
   repositories   RepositoryImport[]
+  indexingJobs   IndexingJob[]
 }
 
 model Repository {
@@ -37,6 +38,11 @@ model Repository {
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
   imports           RepositoryImport[]
+  indexingJobs      IndexingJob[]
+  files             RepositoryFile[]
+  lastIndexedCommitSha String?
+  lastIndexedAt     DateTime?
+  lastIndexedFileCount Int?
 }
 
 model RepositoryImport {
@@ -49,4 +55,63 @@ model RepositoryImport {
 
   @@unique([userId, repositoryId])
   @@index([userId, importedAt])
+}
+
+enum IndexingStatus {
+  queued
+  cloning
+  filtering
+  saving_inventory
+  completed
+  failed
+}
+
+model IndexingJob {
+  id                    String         @id @default(uuid()) @db.Uuid
+  repositoryId          String         @db.Uuid
+  userId                String         @db.Uuid
+  activeRepositoryId    String?        @unique @db.Uuid
+  status                IndexingStatus @default(queued)
+  progress              Int            @default(0)
+  stage                 String         @default("queued")
+  message               String         @default("Waiting to start")
+  discoveredFileCount   Int            @default(0)
+  eligibleFileCount     Int            @default(0)
+  excludedFileCount     Int            @default(0)
+  attemptCount          Int            @default(0)
+  maxAttempts           Int            @default(3)
+  errorCode             String?
+  errorMessage          String?
+  bullmqJobId           String         @unique
+  startedAt             DateTime?
+  completedAt           DateTime?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+  repository            Repository     @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  user                  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  files                 RepositoryFile[]
+
+  @@index([status, createdAt])
+  @@index([repositoryId, createdAt])
+  @@index([userId, createdAt])
+}
+
+model RepositoryFile {
+  id              String       @id @default(uuid()) @db.Uuid
+  repositoryId    String       @db.Uuid
+  indexingJobId   String       @db.Uuid
+  relativePath    String
+  extension       String
+  category        String
+  sizeBytes       BigInt
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  repository      Repository   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  indexingJob     IndexingJob  @relation(fields: [indexingJobId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, relativePath])
+  @@index([repositoryId])
+  @@index([indexingJobId])
+  @@index([extension])
+  @@index([category])
 }

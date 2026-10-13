@@ -12,11 +12,13 @@ try {
 const [
   { createApp }, 
   { prisma }, 
-  { redis }] = await Promise.all([
-  import('./app.js'), import('./lib/prisma.js'), import('./lib/redis.js')
+  { redis },
+  { createIndexingQueue }] = await Promise.all([
+  import('./app.js'), import('./lib/prisma.js'), import('./lib/redis.js'), import('./lib/indexing-queue.js')
 ]);
 
-const app = createApp({ prisma, redis, config });
+const { queue: indexingQueue, connection: indexingRedis } = createIndexingQueue(config.redisUrl);
+const app = createApp({ prisma, redis, indexingQueue, config });
 const server = app.listen(config.port, () => {
   console.info(`CodeCompass API listening on port ${config.port}`);
 });
@@ -31,15 +33,17 @@ async function shutdown(signal) {
     process.exit(1);
   }, 10000);
   forceTimer.unref();
-  server.close(async (serverError) => {
-    const results = await Promise.allSettled([prisma.$disconnect(), redis.quit()]);
-    clearTimeout(forceTimer);
-    const failed = serverError || results.some((result) => result.status === 'rejected');
-    if (failed) {
-      console.error('Shutdown encountered an error', serverError ?? results);
-      process.exitCode = 1;
-    }
+  const serverError = await new Promise((resolve) => {
+    if (!server.listening) return resolve(null);
+    server.close((error) => resolve(error ?? null));
   });
+  const results = await Promise.allSettled([prisma.$disconnect(), redis.quit(), indexingQueue.close(), indexingRedis.quit()]);
+  clearTimeout(forceTimer);
+  const failed = (serverError && serverError.code !== 'ERR_SERVER_NOT_RUNNING') || results.some((result) => result.status === 'rejected');
+  if (failed) {
+    console.error('Shutdown encountered an error', serverError ?? results);
+    process.exitCode = 1;
+  }
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));

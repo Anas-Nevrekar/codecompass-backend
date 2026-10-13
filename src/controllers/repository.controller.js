@@ -1,5 +1,6 @@
 import { HttpError } from '../lib/http-error.js';
 import { parsePublicGitHubRepositoryUrl } from '../services/github-repository-url.service.js';
+import { createIndexingController } from './indexing.controller.js';
 import {
   fetchPublicRepository,
   importRepositoryForUser,
@@ -7,6 +8,7 @@ import {
 } from '../services/github-repository.service.js';
 
 function repositoryResponse(repository) {
+  const latestJob = repository.indexingJobs?.[0] ?? null;
   return {
     id: repository.id,
     owner: repository.owner,
@@ -20,12 +22,20 @@ function repositoryResponse(repository) {
     starsCount: repository.starsCount,
     forksCount: repository.forksCount,
     githubCreatedAt: repository.githubCreatedAt,
-    metadataUpdatedAt: repository.metadataUpdatedAt
+    metadataUpdatedAt: repository.metadataUpdatedAt,
+    latestIndexingStatus: latestJob?.status ?? null,
+    latestIndexingJobId: latestJob?.id ?? null,
+    lastIndexedCommitSha: repository.lastIndexedCommitSha ?? null,
+    lastIndexedAt: repository.lastIndexedAt ?? null,
+    eligibleFileCount: repository.lastIndexedFileCount ?? null
   };
 }
 
-export function createRepositoryController({ prisma, fetchImpl }) {
+export function createRepositoryController({ prisma, fetchImpl, indexingQueue }) {
+  const indexingController = createIndexingController({ prisma, indexingQueue });
   return {
+    startIndexing: indexingController.start,
+    indexingStatus: indexingController.repositoryStatus,
     async import(req, res, next) {
       try {
         if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) ||

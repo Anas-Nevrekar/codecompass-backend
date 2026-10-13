@@ -115,7 +115,7 @@ export async function importRepositoryForUser({ prisma, userId, metadata }) {
 export async function listRepositoriesForUser(prisma, userId) {
   return prisma.repositoryImport.findMany({
     where: { userId },
-    include: { repository: true },
+    include: { repository: { include: { indexingJobs: { orderBy: { createdAt: 'desc' }, take: 1 } } } },
     orderBy: { importedAt: 'desc' }
   });
 }
