@@ -1,0 +1,1 @@
+-- Foundation migration. Application tables will be introduced in later phases.
