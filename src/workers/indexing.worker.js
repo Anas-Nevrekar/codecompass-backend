@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { Queue, Worker } from 'bullmq';
 import Redis from 'ioredis';
 import { prisma } from '../lib/prisma.js';
@@ -5,11 +6,13 @@ import { INDEXING_QUEUE_NAME } from '../lib/indexing-queue.js';
 import { cleanStaleIndexingDirectories, prepareIndexingTempRoot } from '../services/repository-clone.service.js';
 import { recoverQueuedIndexingJobs } from '../services/indexing-job.service.js';
 import { createIndexingProcessor, markIndexingJobFailed } from '../services/indexing-worker.service.js';
+import { cleanUnreferencedRetainedClones, prepareRepositoryStorageRoot } from '../services/retained-repository-storage.service.js';
 import { validateEnv } from '../config/env.js';
 
 const config = validateEnv();
 const indexingConfig = config.indexing;
 await prepareIndexingTempRoot(indexingConfig.tempDir);
+await prepareRepositoryStorageRoot(indexingConfig.repositoryStorageDir, indexingConfig.tempDir);
 const connection = new Redis(config.redisUrl, {
   lazyConnect: true,
   connectTimeout: 3000,
@@ -22,6 +25,9 @@ const processIndexingJob = createIndexingProcessor({ prisma, indexingConfig });
 await cleanStaleIndexingDirectories({ tempDir: indexingConfig.tempDir, staleAgeMs: indexingConfig.staleTempDirAgeMs })
   .then((removed) => { if (removed) console.info('Removed stale indexing temporary directories', { removed }); })
   .catch(() => console.error('Stale indexing temporary directory cleanup failed'));
+await cleanUnreferencedRetainedClones({ prisma, storageDir: indexingConfig.repositoryStorageDir, staleAgeMs: indexingConfig.staleTempDirAgeMs })
+  .then((removed) => { if (removed) console.info('Removed abandoned retained repository clones', { removed }); })
+  .catch(() => console.error('Abandoned retained repository cleanup failed'));
 
 const worker = new Worker(INDEXING_QUEUE_NAME, processIndexingJob, {
   connection,

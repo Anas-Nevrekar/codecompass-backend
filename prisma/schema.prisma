@@ -43,6 +43,7 @@ model Repository {
   lastIndexedCommitSha String?
   lastIndexedAt     DateTime?
   lastIndexedFileCount Int?
+  retainedStoragePath String?
 }
 
 model RepositoryImport {

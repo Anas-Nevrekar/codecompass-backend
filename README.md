@@ -129,6 +129,7 @@ For local schema development, `npm run db:migrate` creates/applies a migration. 
 | `INDEXING_MAX_FILE_SIZE_MB` | `2` | Larger supported files are excluded before any file content is read. |
 | `INDEXING_WORKER_CONCURRENCY` | `2` | Maximum simultaneous repository jobs in this worker process. Lower it on machines with limited disk or memory. |
 | `INDEXING_TEMP_DIR` | system temp `/codecompass-indexing` | Dedicated parent directory for unique temporary clones. Must be outside the application directory; leave blank for the system temporary directory. |
+| `INDEXING_REPOSITORY_STORAGE_DIR` | `../codecompass-repository-storage` beside the backend directory | Persistent root for completed clones. Must be a dedicated directory outside the application directory and separate from `INDEXING_TEMP_DIR`. |
 | `INDEXING_STALE_TEMP_DIR_AGE_HOURS` | `24` | Age before an abandoned, CodeCompass-named temporary directory is removed. |
 | `INDEXING_RECOVERY_INTERVAL_MS` | `30000` | Periodic database-to-Redis reconciliation interval. |
 
@@ -142,7 +143,24 @@ The worker excludes `.git`, dependencies, virtual environments, generated/build/
 
 The job status is one of `queued`, `cloning`, `filtering`, `saving_inventory`, `completed`, or `failed`. Progress advances through 0% queued, 10% cloning, 70% filtering, 90% inventory persistence, and 100% completed. Clone progress is not estimated. On retries, the displayed percentage never decreases; the status and stage show the current attempt. BullMQ makes at most three attempts with exponential backoff starting at one second. Timeouts and temporary Git/filesystem errors can retry. Invalid repository metadata, checkout size-limit failures, a missing Git executable, and clear GitHub “repository not found” errors are permanent. Safe error codes/messages are returned; filesystem paths, raw Git output, and stack traces are not.
 
-The old inventory stays available while a new clone and scan run. Once ready, the worker replaces repository files, records the new commit and timestamp, and marks the job complete inside one PostgreSQL transaction. A failed attempt leaves the last successful inventory and repository metadata unchanged. File inserts are batched within that transaction. Temporary directories are created uniquely under the configured root and removed in a `finally` path. Startup and periodic cleanup only target old direct child directories with the `codecompass-index-` prefix; active directories have an owner PID marker and are skipped across worker processes.
+The old inventory and retained clone stay available while a new clone and scan run. A completed candidate is moved into `<INDEXING_REPOSITORY_STORAGE_DIR>/repositories/<repository UUID>/<indexing job UUID>`. The worker then switches the inventory, commit SHA, timestamp, relative storage reference, and completed job state together in one PostgreSQL transaction. Only after that commit does it remove the superseded clone. If cloning, filtering, filesystem preparation, or the transaction fails, the previous successful clone and inventory remain current. The database stores this generated relative reference only; API responses do not expose it or an absolute server path.
+
+Temporary clones remain under `INDEXING_TEMP_DIR` and are deleted after each attempt. Periodic stale-temp cleanup is restricted to its `codecompass-index-` children. Retained clones are outside that root and are never removed on normal completion or worker shutdown. At worker startup, old unreferenced version directories left by a crash are removed after checking database references and live-process markers. Current retained clones are not subject to age cleanup. Successful clones contain the actual checkout, including `.git`, and no source contents are stored in PostgreSQL.
+
+Retained clones consume disk space approximately in proportion to repository checkout size. Keep enough space available for the current clone plus a replacement during re-indexing; old versions are removed only after the new inventory and path are committed. CodeCompass does not silently delete current clones to reclaim space. To inspect a missing clone, compare the repository's `retainedStoragePath` and `lastIndexedCommitSha` in PostgreSQL, verify that the referenced directory exists under the configured storage root, and check worker logs for filesystem or cleanup errors. Re-run indexing if the committed directory is genuinely missing.
+
+The checked-in Docker Compose file runs only PostgreSQL and Redis; the documented API and worker commands run on the host, so the default sibling storage directory persists across Compose container recreation. If you later run the worker in a container, mount persistent host storage at the same path in every worker container and set `INDEXING_REPOSITORY_STORAGE_DIR` to that mount, for example:
+
+```yaml
+services:
+  backend-worker:
+    volumes:
+      - ./codecompass-repository-storage:/var/lib/codecompass/repositories
+    environment:
+      INDEXING_REPOSITORY_STORAGE_DIR: /var/lib/codecompass/repositories
+```
+
+Do not rely on a container's writable layer for retained clones. The API does not need access to clone files; the indexing worker and future parsing worker do.
 
 ### Indexing API
 

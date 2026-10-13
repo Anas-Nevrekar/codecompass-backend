@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, mkdir, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import request from 'supertest';
@@ -12,11 +12,13 @@ import { replaceRepositoryInventory } from '../src/services/repository-inventory
 import { createIndexingProcessor } from '../src/services/indexing-worker.service.js';
 import { discoverRepositoryFiles } from '../src/services/repository-file-discovery.service.js';
 import { cleanStaleIndexingDirectories, IndexingError, resolveIndexingTempRoot, withClonedRepository } from '../src/services/repository-clone.service.js';
+import { cleanUnreferencedRetainedClones, finalizeRetainedClone, prepareRetainedClone, removeRetainedClone, resolveRepositoryStorageRoot } from '../src/services/retained-repository-storage.service.js';
 
 process.env.NODE_ENV = 'test';
 
 const userId = '8b81a6dc-818a-4c09-8e43-153dd0c14ab0';
 const repositoryId = '4bcf1fd5-df1c-4da0-b495-e25a10f8b2cb';
+const workerJobId = '3b942a20-8d10-4bbd-a4c7-287f8c15e401';
 const secret = 'indexing-test-secret-with-at-least-32-bytes';
 
 function memoryApi() {
@@ -96,6 +98,11 @@ test('repository indexing request is authenticated, ownership checked, and queue
   const repositoryStatus = await request(app).get(`/api/repositories/${repositoryId}/indexing-status`).set('Cookie', await cookie());
   assert.equal(repositoryStatus.status, 200);
   assert.equal(repositoryStatus.body.latestJob.id, response.body.job.id);
+  assert.equal(Object.hasOwn(repositoryStatus.body, 'retainedStoragePath'), false);
+  const repositoryList = await request(app).get('/api/repositories').set('Cookie', await cookie());
+  assert.equal(repositoryList.status, 200);
+  assert.equal(JSON.stringify(repositoryList.body).includes('retainedStoragePath'), false);
+  assert.equal(JSON.stringify(repositoryList.body).includes('codecompass-repository-storage'), false);
   const repeated = await request(app).post(`/api/repositories/${repositoryId}/index`).set('Origin', 'http://localhost:5173').set('Cookie', await cookie());
   assert.equal(repeated.status, 200);
   assert.equal(repeated.body.alreadyRunning, true);
@@ -154,7 +161,7 @@ test('queue publication failure leaves the PostgreSQL job queued for recovery', 
 test('inventory replacement commits the latest files atomically and preserves the old inventory on failure', async () => {
   const state = {
     files: [{ repositoryId, indexingJobId: 'old-job', relativePath: 'old.js', extension: '.js', category: 'source', sizeBytes: 3n }],
-    repository: { lastIndexedCommitSha: 'old-commit', lastIndexedFileCount: 1 },
+    repository: { lastIndexedCommitSha: 'old-commit', lastIndexedFileCount: 1, retainedStoragePath: `repositories/${repositoryId}/84fef64d-aeb8-43ec-a8db-5f84dba56388` },
     job: { status: 'saving_inventory', progress: 90 }
   };
   let failInsert = false;
@@ -182,10 +189,12 @@ test('inventory replacement commits the latest files atomically and preserves th
     { relativePath: 'README.md', extension: '.md', category: 'documentation', sizeBytes: 4n }
   ];
   const counts = { discoveredFileCount: 3, eligibleFileCount: 2, excludedFileCount: 1 };
-  await replaceRepositoryInventory({ prisma, indexingJobId: 'new-job', repositoryId, files, counts, commitSha: 'new-commit' });
+  const newStoragePath = `repositories/${repositoryId}/7168c9df-f906-4f00-af5b-19da0c0838af`;
+  await replaceRepositoryInventory({ prisma, indexingJobId: 'new-job', repositoryId, files, counts, commitSha: 'new-commit', retainedStoragePath: newStoragePath });
   assert.deepEqual(state.files.map((file) => file.relativePath).sort(), ['README.md', 'src/new.js']);
   assert.ok(state.files.every((file) => !Object.hasOwn(file, 'contents')));
   assert.equal(state.repository.lastIndexedCommitSha, 'new-commit');
+  assert.equal(state.repository.retainedStoragePath, newStoragePath);
   assert.equal(state.job.status, 'completed');
   assert.equal(state.job.progress, 100);
 
@@ -215,11 +224,14 @@ test('stale in-progress jobs are returned to the queue only after the reconcilia
 });
 
 test('worker processor persists stages, counts, completion, and bounded retry or failure states', async (t) => {
-  async function setup(cloneRepository) {
+  async function setup(makeCloneRepository, { persistFails = false, previousStoragePath = null } = {}) {
+    const filesystemRoot = await mkdtemp(path.join(os.tmpdir(), 'cc-worker-retention-'));
+    t.after(() => rm(filesystemRoot, { recursive: true, force: true }));
+    const cloneRepository = makeCloneRepository(filesystemRoot);
     const state = {
-      id: 'worker-job', repositoryId, status: 'queued', attemptCount: 0, maxAttempts: 3,
+      id: workerJobId, repositoryId, status: 'queued', attemptCount: 0, maxAttempts: 3,
       progress: 0, startedAt: null, errorCode: null, errorMessage: null,
-      repository: { id: repositoryId, owner: 'owner', name: 'repo', visibility: 'public' }
+      repository: { id: repositoryId, owner: 'owner', name: 'repo', visibility: 'public', retainedStoragePath: previousStoragePath }
     };
     const history = [];
     const prisma = {
@@ -235,50 +247,86 @@ test('worker processor persists stages, counts, completion, and bounded retry or
     const persisted = [];
     const processor = createIndexingProcessor({
       prisma,
-      indexingConfig: { maxFileSizeBytes: 1024 },
+      indexingConfig: { maxFileSizeBytes: 1024, repositoryStorageDir: path.join(filesystemRoot, 'retained') },
       cloneRepository,
       discoverFiles: async () => ({
         files: [{ relativePath: 'README.md', extension: '.md', category: 'documentation', sizeBytes: 4n }],
         discoveredFileCount: 2, eligibleFileCount: 1, excludedFileCount: 1
       }),
       persistInventory: async (input) => {
+        if (persistFails) throw new Error('simulated inventory transaction failure');
         persisted.push(input);
         Object.assign(state, { status: 'completed', stage: 'completed', progress: 100, eligibleFileCount: input.counts.eligibleFileCount, completedAt: new Date() });
+        state.repository.retainedStoragePath = input.retainedStoragePath;
         history.push({ status: state.status, progress: state.progress });
       },
       logger: { info() {}, warn() {} }
     });
-    return { state, history, persisted, processor };
+    return { state, history, persisted, processor, filesystemRoot };
   }
 
   await t.test('successful indexing reaches completed at 100 percent with discovered counts', async () => {
-    const context = await setup(async ({ work }) => work({ repositoryDirectory: '/temporary/repo', commitSha: 'c'.repeat(40) }));
-    await context.processor({ data: { indexingJobId: 'worker-job' }, attemptsMade: 0 });
+    const context = await setup((root) => async ({ work }) => {
+      const repositoryDirectory = path.join(root, 'temporary-repo');
+      await mkdir(repositoryDirectory);
+      await writeFile(path.join(repositoryDirectory, 'README.md'), 'source files stay on disk');
+      return work({ repositoryDirectory, commitSha: 'c'.repeat(40) });
+    });
+    await context.processor({ data: { indexingJobId: workerJobId }, attemptsMade: 0 });
     assert.deepEqual(context.history.map((item) => item.status), ['cloning', 'filtering', 'saving_inventory', 'completed']);
     assert.equal(context.state.progress, 100);
     assert.equal(context.state.eligibleFileCount, 1);
     assert.equal(context.persisted[0].commitSha, 'c'.repeat(40));
+    assert.match(context.persisted[0].retainedStoragePath, /^repositories\/[0-9a-f-]+\/[0-9a-f-]+$/);
+    assert.equal(await readFile(path.join(context.filesystemRoot, 'retained', context.persisted[0].retainedStoragePath, 'README.md'), 'utf8'), 'source files stay on disk');
     assert.ok(context.history.every((item, index, list) => index === 0 || item.progress >= list[index - 1].progress));
+    await rm(context.filesystemRoot, { recursive: true, force: true });
   });
 
   await t.test('transient failure is queued for a bounded retry, then exhausted safely', async () => {
-    const context = await setup(async () => { throw new IndexingError('CLONE_TIMEOUT', 'Clone timed out.', { retryable: true }); });
-    await assert.rejects(context.processor({ data: { indexingJobId: 'worker-job' }, attemptsMade: 0 }), /Clone timed out/);
+    const context = await setup(() => async () => { throw new IndexingError('CLONE_TIMEOUT', 'Clone timed out.', { retryable: true }); });
+    await assert.rejects(context.processor({ data: { indexingJobId: workerJobId }, attemptsMade: 0 }), /Clone timed out/);
     assert.equal(context.state.status, 'queued');
     assert.equal(context.state.attemptCount, 1);
     assert.ok(context.state.progress >= 10);
 
-    await assert.rejects(context.processor({ data: { indexingJobId: 'worker-job' }, attemptsMade: 2 }));
+    await assert.rejects(context.processor({ data: { indexingJobId: workerJobId }, attemptsMade: 2 }));
     assert.equal(context.state.status, 'failed');
     assert.equal(context.state.errorCode, 'CLONE_TIMEOUT');
   });
 
   await t.test('permanent errors fail immediately without spending retry attempts', async () => {
-    const context = await setup(async () => { throw new IndexingError('REPOSITORY_UNAVAILABLE', 'Repository is not public.'); });
-    await assert.rejects(context.processor({ data: { indexingJobId: 'worker-job' }, attemptsMade: 0 }), (error) => error.name === 'UnrecoverableError');
+    const context = await setup(() => async () => { throw new IndexingError('REPOSITORY_UNAVAILABLE', 'Repository is not public.'); });
+    await assert.rejects(context.processor({ data: { indexingJobId: workerJobId }, attemptsMade: 0 }), (error) => error.name === 'UnrecoverableError');
     assert.equal(context.state.status, 'failed');
     assert.equal(context.state.errorCode, 'REPOSITORY_UNAVAILABLE');
     assert.equal(context.state.attemptCount, 1);
+    await rm(context.filesystemRoot, { recursive: true, force: true });
+  });
+
+  await t.test('a failed clone creates no retained directory', async () => {
+    const context = await setup(() => async () => { throw new IndexingError('CLONE_FAILED', 'Clone failed.', { retryable: true }); });
+    await assert.rejects(context.processor({ data: { indexingJobId: workerJobId }, attemptsMade: 0 }));
+    assert.equal(context.state.repository.retainedStoragePath, null);
+    await assert.rejects(readdir(path.join(context.filesystemRoot, 'retained', 'repositories')), { code: 'ENOENT' });
+  });
+
+  await t.test('failed re-index persistence removes only the candidate and preserves the previous clone', async () => {
+    const previousStoragePath = `repositories/${repositoryId}/a3d81555-1c25-4a16-b2dd-3812a09b2702`;
+    const context = await setup((root) => async ({ work }) => {
+      const repositoryDirectory = path.join(root, 'candidate');
+      await mkdir(repositoryDirectory);
+      await writeFile(path.join(repositoryDirectory, 'README.md'), 'replacement candidate');
+      return work({ repositoryDirectory, commitSha: 'd'.repeat(40) });
+    }, { persistFails: true, previousStoragePath });
+    const previousDirectory = path.join(context.filesystemRoot, 'retained', previousStoragePath);
+    await mkdir(previousDirectory, { recursive: true });
+    await writeFile(path.join(previousDirectory, 'README.md'), 'previous clone');
+    await assert.rejects(context.processor({ data: { indexingJobId: workerJobId }, attemptsMade: 0 }), (error) => error.code === 'INDEXING_FAILED' && error.retryable);
+    assert.equal(context.state.repository.retainedStoragePath, previousStoragePath);
+    assert.equal(await readFile(path.join(previousDirectory, 'README.md'), 'utf8'), 'previous clone');
+    assert.deepEqual(await readdir(path.dirname(previousDirectory)), [path.basename(previousDirectory)]);
+    await rm(context.filesystemRoot, { recursive: true, force: true });
   });
 });
 
@@ -364,4 +412,69 @@ test('stale cleanup removes only old CodeCompass-owned child directories', async
   const remaining = await readdir(root);
   assert.deepEqual(remaining.sort(), ['codecompass-index-active', 'codecompass-index-fresh', 'keep-me']);
   assert.throws(() => resolveIndexingTempRoot(process.cwd()), /outside the application directory/);
+});
+
+test('retained clones survive restart, failed replacement, and cleanup while successful replacement switches safely', async (t) => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'cc-retained-test-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const storageDir = path.join(parent, 'persistent-repositories');
+  const sourceV1 = path.join(parent, 'source-v1');
+  await mkdir(sourceV1);
+  await writeFile(path.join(sourceV1, 'app.js'), 'version one');
+  const first = await prepareRetainedClone({ storageDir, repositoryId, indexingJobId: '84fef64d-aeb8-43ec-a8db-5f84dba56388', sourceDirectory: sourceV1 });
+  let databaseRepository = { retainedStoragePath: first.storagePath, lastIndexedCommitSha: 'a'.repeat(40) };
+  await finalizeRetainedClone({ storageDir, storagePath: first.storagePath });
+
+  // A new helper invocation models a worker restart: the database's relative reference resolves to the same files.
+  assert.equal(await readFile(path.join(resolveRepositoryStorageRoot(storageDir), databaseRepository.retainedStoragePath, 'app.js'), 'utf8'), 'version one');
+  const sourceFailed = path.join(parent, 'source-failed');
+  await mkdir(sourceFailed);
+  await writeFile(path.join(sourceFailed, 'app.js'), 'failed candidate');
+  const failed = await prepareRetainedClone({ storageDir, repositoryId, indexingJobId: '5f008150-b643-4e02-87ba-77b57073bf53', sourceDirectory: sourceFailed });
+  await removeRetainedClone({ storageDir, storagePath: failed.storagePath });
+  assert.equal(databaseRepository.retainedStoragePath, first.storagePath);
+  assert.equal(await readFile(path.join(resolveRepositoryStorageRoot(storageDir), first.storagePath, 'app.js'), 'utf8'), 'version one');
+
+  const sourceV2 = path.join(parent, 'source-v2');
+  await mkdir(sourceV2);
+  await writeFile(path.join(sourceV2, 'app.js'), 'version two');
+  const second = await prepareRetainedClone({ storageDir, repositoryId, indexingJobId: '7168c9df-f906-4f00-af5b-19da0c0838af', sourceDirectory: sourceV2 });
+  const txState = { files: [], repository: { ...databaseRepository }, job: {} };
+  const prisma = {
+    async $transaction(work) {
+      const draft = structuredClone(txState);
+      const tx = {
+        repositoryFile: { async deleteMany() { draft.files = []; }, async createMany({ data }) { draft.files.push(...data); } },
+        repository: { async update({ data }) { Object.assign(draft.repository, data); } },
+        indexingJob: { async update({ data }) { Object.assign(draft.job, data); } }
+      };
+      await work(tx);
+      Object.assign(txState, draft);
+    },
+    repository: { async findMany() { return [{ retainedStoragePath: txState.repository.retainedStoragePath }]; } }
+  };
+  await replaceRepositoryInventory({
+    prisma, repositoryId, indexingJobId: '7168c9df-f906-4f00-af5b-19da0c0838af',
+    files: [{ relativePath: 'app.js', extension: '.js', category: 'source', sizeBytes: 11n }],
+    counts: { discoveredFileCount: 1, eligibleFileCount: 1, excludedFileCount: 0 },
+    commitSha: 'b'.repeat(40), retainedStoragePath: second.storagePath
+  });
+  databaseRepository = txState.repository;
+  await finalizeRetainedClone({ storageDir, storagePath: second.storagePath, previousStoragePath: first.storagePath });
+  assert.equal(databaseRepository.lastIndexedCommitSha, 'b'.repeat(40));
+  assert.equal(databaseRepository.retainedStoragePath, second.storagePath);
+  assert.equal(txState.files[0].relativePath, 'app.js');
+  assert.equal(await readFile(path.join(resolveRepositoryStorageRoot(storageDir), second.storagePath, 'app.js'), 'utf8'), 'version two');
+  await assert.rejects(readFile(path.join(resolveRepositoryStorageRoot(storageDir), first.storagePath, 'app.js'), 'utf8'));
+  assert.equal(await cleanUnreferencedRetainedClones({ prisma, storageDir, staleAgeMs: 0 }), 0);
+  assert.throws(() => resolveRepositoryStorageRoot(process.cwd()), /outside the application directory/);
+
+  const unsafeRoot = path.join(parent, 'unsafe-storage');
+  const outside = path.join(parent, 'outside');
+  await mkdir(unsafeRoot);
+  await mkdir(outside);
+  await symlink(outside, path.join(unsafeRoot, 'repositories'));
+  await assert.rejects(prepareRetainedClone({
+    storageDir: unsafeRoot, repositoryId, indexingJobId: 'b34e37a4-4a51-41e9-b017-3dbbdd9ef216', sourceDirectory: sourceV1
+  }), /Repository storage directory must remain within its configured root/);
 });

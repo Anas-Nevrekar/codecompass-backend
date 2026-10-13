@@ -13,6 +13,7 @@ const DEFAULTS = {
   INDEXING_MAX_FILE_SIZE_MB: '2',
   INDEXING_WORKER_CONCURRENCY: '2',
   INDEXING_TEMP_DIR: '',
+  INDEXING_REPOSITORY_STORAGE_DIR: '',
   INDEXING_STALE_TEMP_DIR_AGE_HOURS: '24',
   INDEXING_RECOVERY_INTERVAL_MS: '30000'
 };
@@ -59,6 +60,7 @@ export function validateEnv(source = process.env) {
     maxFileSizeBytes: positiveInteger(values.INDEXING_MAX_FILE_SIZE_MB, 'INDEXING_MAX_FILE_SIZE_MB', 1024) * 1024 * 1024,
     workerConcurrency: positiveInteger(values.INDEXING_WORKER_CONCURRENCY, 'INDEXING_WORKER_CONCURRENCY', 32),
     tempDir: values.INDEXING_TEMP_DIR,
+    repositoryStorageDir: values.INDEXING_REPOSITORY_STORAGE_DIR,
     staleTempDirAgeMs: positiveInteger(values.INDEXING_STALE_TEMP_DIR_AGE_HOURS, 'INDEXING_STALE_TEMP_DIR_AGE_HOURS', 720) * 60 * 60 * 1000,
     recoveryIntervalMs: positiveInteger(values.INDEXING_RECOVERY_INTERVAL_MS, 'INDEXING_RECOVERY_INTERVAL_MS', 3600000)
   };

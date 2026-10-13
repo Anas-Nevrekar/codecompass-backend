@@ -2,6 +2,7 @@ import { UnrecoverableError } from 'bullmq';
 import { IndexingError, withClonedRepository } from './repository-clone.service.js';
 import { discoverRepositoryFiles } from './repository-file-discovery.service.js';
 import { replaceRepositoryInventory } from './repository-inventory.service.js';
+import { finalizeRetainedClone, prepareRetainedClone, removeRetainedClone } from './retained-repository-storage.service.js';
 
 export async function markIndexingJobFailed(prisma, indexingJobId, error) {
   const code = error instanceof IndexingError ? error.code : 'INDEXING_FAILED';
@@ -53,7 +54,27 @@ export function createIndexingProcessor({
           eligibleFileCount: counts.eligibleFileCount,
           excludedFileCount: counts.excludedFileCount
         });
-        await persistInventory({ prisma, indexingJobId, repositoryId: job.repositoryId, files: counts.files, counts, commitSha });
+        const retained = await prepareRetainedClone({
+          storageDir: indexingConfig.repositoryStorageDir,
+          repositoryId: job.repositoryId,
+          indexingJobId,
+          sourceDirectory: repositoryDirectory
+        });
+        try {
+          await persistInventory({
+            prisma, indexingJobId, repositoryId: job.repositoryId, files: counts.files,
+            counts, commitSha, retainedStoragePath: retained.storagePath
+          });
+        } catch (error) {
+          try { await removeRetainedClone({ storageDir: indexingConfig.repositoryStorageDir, storagePath: retained.storagePath }); }
+          catch { logger.warn('Could not remove an uncommitted retained repository clone', { jobId: indexingJobId }); }
+          throw error;
+        }
+        await finalizeRetainedClone({
+          storageDir: indexingConfig.repositoryStorageDir,
+          storagePath: retained.storagePath,
+          previousStoragePath: job.repository.retainedStoragePath
+        });
         logger.info('Repository indexing completed', { jobId: indexingJobId, fileCount: counts.eligibleFileCount });
       } });
     } catch (originalError) {

@@ -1,4 +1,4 @@
-export async function replaceRepositoryInventory({ prisma, indexingJobId, repositoryId, files, counts, commitSha }) {
+export async function replaceRepositoryInventory({ prisma, indexingJobId, repositoryId, files, counts, commitSha, retainedStoragePath }) {
   return prisma.$transaction(async (tx) => {
     await tx.repositoryFile.deleteMany({ where: { repositoryId } });
     for (let offset = 0; offset < files.length; offset += 500) {
@@ -13,7 +13,7 @@ export async function replaceRepositoryInventory({ prisma, indexingJobId, reposi
     const indexedAt = new Date();
     await tx.repository.update({
       where: { id: repositoryId },
-      data: { lastIndexedCommitSha: commitSha, lastIndexedAt: indexedAt, lastIndexedFileCount: counts.eligibleFileCount }
+      data: { lastIndexedCommitSha: commitSha, lastIndexedAt: indexedAt, lastIndexedFileCount: counts.eligibleFileCount, retainedStoragePath }
     });
     await tx.indexingJob.update({
       where: { id: indexingJobId },
