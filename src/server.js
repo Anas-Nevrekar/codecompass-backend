@@ -16,7 +16,7 @@ const [
   import('./app.js'), import('./lib/prisma.js'), import('./lib/redis.js')
 ]);
 
-const app = createApp({ prisma, redis, frontendUrl: config.frontendUrl, nodeEnv: config.nodeEnv });
+const app = createApp({ prisma, redis, config });
 const server = app.listen(config.port, () => {
   console.info(`CodeCompass API listening on port ${config.port}`);
 });

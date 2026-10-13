@@ -1,72 +1,99 @@
 # CodeCompass Backend
 
-CodeCompass is an AI-powered codebase onboarding assistant. This repository contains the Node.js backend foundation; the future React/Vite frontend will live in its own repository and communicate with this service through REST APIs. The frontend will configure its API base URL independently.
+CodeCompass is an AI-powered codebase onboarding assistant. This repository contains the Node.js backend. The React/Vite frontend is maintained separately and communicates with this service through REST APIs.
 
-## Phase 1 architecture
+## Architecture
 
-The API uses Express with ES modules. `src/app.js` configures HTTP middleware and routes, `src/server.js` validates configuration and manages the process lifecycle, and health/readiness controllers delegate infrastructure checks to a service. Prisma is the shared PostgreSQL client; ioredis is the shared Redis connection. The Prisma schema deliberately has no application models yet. The initial versioned migration records the foundation without creating tables.
+- Express 5 with JavaScript ES modules.
+- PostgreSQL with Prisma models for users, shared public repository metadata, and user/repository imports.
+- GitHub OAuth App web flow, with a signed, HTTP-only CodeCompass session cookie.
+- GitHub REST API for profile identity and public repository metadata. OAuth access tokens are discarded after profile lookup.
+- Redis and BullMQ remain from the Phase 1 foundation; Phase 2 does not use queues.
 
-The stack is Node.js, Express, PostgreSQL, Prisma, Redis, BullMQ (installed for future queue work; no queues or workers are created in this phase), Docker Compose, and npm.
+Repository import stores metadata only. This MVP does not clone or index source code and does not support private repositories.
 
 ## Prerequisites
 
 - Node.js 20 or newer and npm
 - Docker with the Docker Compose plugin
+- A GitHub OAuth App for end-to-end sign-in
 
 ## Install and configure
-
-From this repository directory:
 
 ```bash
 npm install
 cp .env.example .env
 ```
 
-`.env.example` contains local development values only. `.env` is ignored by Git. For local Docker development, keep the database URL host as `localhost`; the Compose services publish PostgreSQL and Redis ports to the host.
+Set the local OAuth session secret to a random value of at least 32 bytes. For example:
 
-## Start PostgreSQL and Redis
+```bash
+openssl rand -base64 32
+```
+
+Set `SESSION_SECRET` to the generated value. Configure `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, and `GITHUB_CALLBACK_URL` as described below. Basic health checks and the API process can run when OAuth values are missing; OAuth requests then return `OAUTH_CONFIGURATION_ERROR`.
+
+`.env` is ignored by Git. Never commit credentials.
+
+## Register a GitHub OAuth App
+
+1. In GitHub, open **Settings → Developer settings → OAuth Apps → New OAuth App**.
+2. Set the homepage URL to `http://localhost:5173` for local development.
+3. Set the authorization callback URL to `http://localhost:3000/api/auth/github/callback`.
+4. Register the app, then copy its client ID and generate a client secret into `.env`.
+5. Keep `GITHUB_CALLBACK_URL` identical to the registered callback URL.
+
+In production, use HTTPS for the callback and set `FRONTEND_URL` to the exact deployed frontend origin. GitHub sign-in requests only the `read:user` scope. No repository scope is requested; public repository metadata is read from GitHub's public API without retaining the OAuth access token.
+
+## Start local infrastructure and apply migrations
 
 ```bash
 docker compose up -d
 docker compose ps
-```
-
-Stop the services while preserving the PostgreSQL data volume with:
-
-```bash
-docker compose down
-```
-
-To intentionally erase the local database and start fresh, run `docker compose down -v` and then `docker compose up -d`. The named `postgres_data` volume persists across ordinary shutdowns. Redis persistence is not enabled because Phase 1 does not store queue state.
-
-Compose reads `.env` for credentials. If you change `POSTGRES_USER`, `POSTGRES_PASSWORD`, or `POSTGRES_DB`, also update `DATABASE_URL` to match. Configure `POSTGRES_PORT` or `REDIS_PORT` if the default host ports are occupied; update the corresponding connection URL when changing a port.
-
-## Database commands
-
-```bash
 npm run db:validate
 npm run db:migrate
-npm run db:status
 ```
 
-`db:migrate` runs Prisma's development migration workflow. To apply committed migrations in a deployment-like environment, use `npm run db:deploy`. The foundation migration is intentionally empty because Phase 1 defines no application tables.
+The PostgreSQL volume persists when services stop. Stop containers without deleting database data with `docker compose down`. To intentionally erase local data, run `docker compose down -v`.
 
-## Run the API
+## Start the API
 
 ```bash
 npm run dev
 ```
 
-For a non-watch run, use `npm start`. The API listens on `PORT` (3000 by default). The API can start without PostgreSQL or Redis; `/api/ready` reports their live state. Set `FRONTEND_URL` to the exact local frontend origin (default `http://localhost:5173`). In production, only that configured origin is allowed; requests without an Origin header remain usable for health probes and server-to-server calls.
+Use `npm start` for a non-watch run. The server listens on `PORT` (3000 by default). `FRONTEND_URL` must be the exact frontend origin (default `http://localhost:5173`). CORS allows credentials only from that origin. Browser calls that use the session cookie must include credentials, for example `fetch(url, { credentials: 'include' })`. State-changing browser requests (`POST /api/auth/logout` and `POST /api/repositories/import`) must send that exact `Origin`; CORS alone is not treated as CSRF protection.
 
-## Endpoints
+## API contract
 
-```bash
-curl http://localhost:3000/api/health
-curl http://localhost:3000/api/ready
-```
+All API paths are relative to `http://localhost:3000` in local development.
 
-`GET /api/health` returns HTTP 200 when the API process is running and does not contact infrastructure. `GET /api/ready` runs `SELECT 1` through Prisma and `PING` against Redis. It returns HTTP 200 only when both checks succeed, otherwise HTTP 503 with each dependency marked `error`. Unknown routes return a JSON 404.
+### Health
+
+- `GET /api/health` returns `200` while the process is running; it does not require infrastructure.
+- `GET /api/ready` runs a PostgreSQL query and Redis `PING`; it returns `503` if either dependency is unavailable.
+
+### Authentication
+
+- `GET /api/auth/github` starts OAuth and redirects to GitHub. The backend creates a short-lived, signed state cookie and requests `read:user`.
+- `GET /api/auth/github/callback` validates state, exchanges the authorization code server-to-server, validates the GitHub profile, upserts a user by GitHub numeric ID, sets the application cookie, then redirects to `/dashboard` on the frontend. Failures redirect to `/auth/error?code=...` with a stable error code.
+- `GET /api/auth/me` requires a valid session cookie. It returns `200` with `{ "authenticated": true, "user": { "id", "githubUsername", "displayName", "avatarUrl", "profileUrl" } }`; without a valid session it returns `401` with `UNAUTHENTICATED`.
+- `POST /api/auth/logout` requires the configured frontend `Origin`, clears the session cookie, and returns `{ "success": true }`.
+
+The application cookie is HTTP-only, `SameSite=Lax`, scoped to `/api`, and `Secure` in production. Sessions are signed HS256 JWTs that expire after seven days. Logout clears the browser cookie; because sessions are stateless, a previously copied token remains valid until expiry. Do not store session or GitHub tokens in browser storage.
+
+### Public repository metadata
+
+- `POST /api/repositories/import` requires a valid session and the configured frontend `Origin`. Request JSON: `{ "url": "https://github.com/owner/repository" }`. A new import returns `201` with code `REPOSITORY_IMPORTED`; an existing import by the same user returns `200` with code `REPOSITORY_ALREADY_IMPORTED` and `alreadyImported: true`. The response includes stored metadata: repository ID, owner, name, full name, HTML URL, description, default branch, language, visibility, star/fork counts, GitHub creation date, and metadata update date.
+- `GET /api/repositories` requires a valid session and returns only the current user's imports, newest first, as `{ "repositories": [...] }`.
+
+Repository URLs must be HTTPS URLs on exactly `github.com` with an owner and repository path. Trailing slash and `.git` suffix are accepted. Query strings, fragments, credentials, other hosts, and extra path segments are rejected. GitHub repository metadata is fetched from the fixed `api.github.com/repos/{owner}/{repo}` endpoint. The same GitHub repository is stored once and can be associated with multiple users; each user's association is unique.
+
+### Errors
+
+Errors use `{ "error": { "code": "...", "message": "..." } }`. Relevant codes include `UNAUTHENTICATED`, `INVALID_OAUTH_STATE`, `OAUTH_CONFIGURATION_ERROR`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR`, `INVALID_REPOSITORY_URL`, `REPOSITORY_NOT_FOUND_OR_INACCESSIBLE`, `PRIVATE_REPOSITORY_UNSUPPORTED`, `GITHUB_API_RATE_LIMIT`, `GITHUB_UPSTREAM_UNAVAILABLE`, `GITHUB_UPSTREAM_ERROR`, `ORIGIN_FORBIDDEN`, and `RATE_LIMITED`. Private and inaccessible repositories are not distinguished when GitHub does not expose their metadata.
+
+Both `/api/auth/github` and its callback have rate limits; imports are limited to 30 attempts per IP per 15 minutes. Requests to GitHub have an 8-second timeout. Neither OAuth credentials, access tokens, nor session tokens are returned in JSON or logged.
 
 ## Tests
 
@@ -74,16 +101,8 @@ curl http://localhost:3000/api/ready
 npm test
 ```
 
-The test suite uses Node's built-in test runner and in-memory dependency doubles, so these API and configuration checks do not require Docker. Real readiness checks require PostgreSQL and Redis; use `/api/ready` after starting Compose to verify those live connections.
+The automated tests mock GitHub responses and Prisma access, so they do not need live OAuth credentials or GitHub network access. For manual infrastructure checks, start Compose, apply migrations, run the API, and request `/api/ready`. A full OAuth login requires a correctly configured GitHub OAuth App and matching callback URL.
 
-## Troubleshooting
+## Phase scope
 
-- **PostgreSQL connection refused:** check `docker compose ps`, wait for its health check, and confirm `DATABASE_URL` uses the published host port and matching credentials.
-- **Redis connection refused:** confirm the Redis service is healthy and `REDIS_URL` uses the published host port.
-- **Port already in use:** change `PORT` for the API, or set `POSTGRES_PORT` / `REDIS_PORT` and update `DATABASE_URL` / `REDIS_URL` accordingly.
-- **Prisma schema or migration errors:** run `npm run db:validate`, ensure `.env` is present, and check `DATABASE_URL`.
-- **Frontend CORS errors:** set `FRONTEND_URL` to the frontend's exact origin, including scheme and port, then restart the backend.
-
-## Scope
-
-Phase 1 establishes the Express API process, configuration, health and dependency readiness endpoints, PostgreSQL/Prisma and Redis connectivity, local Compose services, migration workflow, and automated tests. Authentication, repository import, cloning, indexing, parsing, embeddings, search, LLM/RAG, citations, visualizations, and the frontend are later phases.
+Phase 1 health/readiness and infrastructure behavior remains available. Phase 2 adds GitHub OAuth, persistent users, cookie sessions, URL validation, public repository metadata import, and user-scoped listing. Cloning, indexing, workers, parsing, embeddings, private repository access, search, LLM/RAG, and frontend implementation remain future work.

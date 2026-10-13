@@ -67,7 +67,12 @@ test('GET /api/ready reports each failed dependency', async (t) => {
 
 test('environment validation accepts defaults and rejects invalid required values', () => {
   assert.equal(validateEnv({}).port, 3000);
+  assert.equal(validateEnv({ NODE_ENV: 'production' }).githubCallbackUrl, '');
   assert.throws(() => validateEnv({ PORT: '70000' }), /PORT/);
   assert.throws(() => validateEnv({ DATABASE_URL: 'not-a-url' }), /DATABASE_URL/);
   assert.throws(() => validateEnv({ REDIS_URL: 'http://localhost' }), /REDIS_URL/);
+  assert.throws(() => validateEnv({ FRONTEND_URL: 'https://example.com/path' }), /FRONTEND_URL/);
+  assert.throws(() => validateEnv({ SESSION_SECRET: 'too-short' }), /SESSION_SECRET/);
+  assert.throws(() => validateEnv({ GITHUB_CALLBACK_URL: 'https://example.com/wrong-path' }), /GITHUB_CALLBACK_URL/);
+  assert.equal(validateEnv({ FRONTEND_URL: 'https://example.com/' }).frontendUrl, 'https://example.com');
 });

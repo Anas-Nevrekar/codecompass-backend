@@ -3,20 +3,25 @@ import cors from 'cors';
 import { createHealthRouter } from './routes/health.routes.js';
 import { notFound } from './middleware/not-found.js';
 import { errorHandler } from './middleware/error-handler.js';
+import { createAuthRouter } from './routes/auth.routes.js';
+import { createRepositoryRouter } from './routes/repository.routes.js';
 
-export function createApp(
-  { 
-    prisma, 
-    redis, 
-    frontendUrl = 'http://localhost:5173', 
-    nodeEnv = 'development' 
-  }) {
-  
+export function createApp({
+  prisma,
+  redis,
+  config = {},
+  fetchImpl = globalThis.fetch,
+  frontendUrl = 'http://localhost:5173',
+  nodeEnv = 'development'
+}) {
+  frontendUrl = config.frontendUrl ?? frontendUrl;
+  nodeEnv = config.nodeEnv ?? nodeEnv;
   const app = express();
 
   app.disable('x-powered-by');
 
   app.use(cors({
+    credentials: true,
     origin(origin, callback) {
       if (!origin || origin === frontendUrl) 
         return callback(null, true);
@@ -35,6 +40,8 @@ export function createApp(
     });
   }
   app.use('/api', createHealthRouter({ prisma, redis }));
+  app.use('/api/auth', createAuthRouter({ prisma, config: { ...config, frontendUrl, nodeEnv }, fetchImpl }));
+  app.use('/api/repositories', createRepositoryRouter({ prisma, config: { ...config, frontendUrl, nodeEnv }, fetchImpl }));
   app.use(notFound);
   app.use(errorHandler);
   return app;

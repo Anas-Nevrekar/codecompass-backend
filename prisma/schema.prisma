@@ -6,3 +6,47 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+model User {
+  id             String             @id @default(uuid()) @db.Uuid
+  githubId       BigInt             @unique
+  githubUsername String
+  displayName    String?
+  avatarUrl      String?
+  profileUrl     String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  repositories   RepositoryImport[]
+}
+
+model Repository {
+  id                String             @id @default(uuid()) @db.Uuid
+  githubId          BigInt             @unique
+  owner             String
+  name              String
+  fullName          String
+  htmlUrl           String
+  description       String?
+  defaultBranch     String?
+  language          String?
+  visibility        String             @default("public")
+  starsCount        Int                @default(0)
+  forksCount        Int                @default(0)
+  githubCreatedAt   DateTime?
+  metadataUpdatedAt DateTime           @default(now())
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  imports           RepositoryImport[]
+}
+
+model RepositoryImport {
+  id           String     @id @default(uuid()) @db.Uuid
+  userId       String     @db.Uuid
+  repositoryId String     @db.Uuid
+  importedAt   DateTime   @default(now())
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  repository   Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, repositoryId])
+  @@index([userId, importedAt])
+}
