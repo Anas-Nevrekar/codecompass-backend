@@ -23,6 +23,7 @@
     "db:status": "prisma migrate status"
   },
   "dependencies": {
+    "@google/genai": "2.32.0",
     "@prisma/client": "^6.19.0",
     "bullmq": "^5.58.5",
     "cookie": "^1.1.1",

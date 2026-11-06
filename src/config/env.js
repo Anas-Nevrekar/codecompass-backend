@@ -21,7 +21,11 @@ const DEFAULTS = {
   EMBEDDING_MAX_INPUT_CHARS: '100000',
   EMBEDDING_WORKER_CONCURRENCY: '1', EMBEDDING_REQUEST_TIMEOUT_MS: '120000',
   HYBRID_SEARCH_VECTOR_LIMIT: '20', HYBRID_SEARCH_KEYWORD_LIMIT: '20',
-  HYBRID_SEARCH_DEFAULT_LIMIT: '10', HYBRID_SEARCH_RRF_K: '60'
+  HYBRID_SEARCH_DEFAULT_LIMIT: '10', HYBRID_SEARCH_RRF_K: '60',
+  LLM_PROVIDER: 'gemini', LLM_API_KEY: '', LLM_MODEL: 'gemini-3.8-flash',
+  LLM_MAX_OUTPUT_TOKENS: '1500', LLM_REQUEST_TIMEOUT_MS: '60000',
+  RAG_RETRIEVAL_LIMIT: '10', RAG_MAX_CONTEXT_TOKENS: '12000',
+  RAG_MAX_QUESTION_LENGTH: '2000', RAG_ENABLE_STREAMING: 'true'
 };
 
 function positiveInteger(value, name, max = Number.MAX_SAFE_INTEGER) {
@@ -91,6 +95,22 @@ export function validateEnv(source = process.env) {
     defaultLimit: positiveInteger(values.HYBRID_SEARCH_DEFAULT_LIMIT, 'HYBRID_SEARCH_DEFAULT_LIMIT', 50),
     rrfK: positiveInteger(values.HYBRID_SEARCH_RRF_K, 'HYBRID_SEARCH_RRF_K', 1000)
   };
+  if (values.LLM_PROVIDER !== 'gemini') throw new Error('LLM_PROVIDER must be gemini');
+  const llm = {
+    provider: values.LLM_PROVIDER,
+    apiKey: values.LLM_API_KEY,
+    model: values.LLM_MODEL,
+    maxOutputTokens: positiveInteger(values.LLM_MAX_OUTPUT_TOKENS, 'LLM_MAX_OUTPUT_TOKENS', 8192),
+    requestTimeoutMs: positiveInteger(values.LLM_REQUEST_TIMEOUT_MS, 'LLM_REQUEST_TIMEOUT_MS', 300000)
+  };
+  if (!llm.model.trim()) throw new Error('LLM_MODEL must not be empty');
+  if (typeof values.RAG_ENABLE_STREAMING !== 'string' || !['true', 'false'].includes(values.RAG_ENABLE_STREAMING.toLowerCase())) throw new Error('RAG_ENABLE_STREAMING must be true or false');
+  const rag = {
+    retrievalLimit: positiveInteger(values.RAG_RETRIEVAL_LIMIT, 'RAG_RETRIEVAL_LIMIT', 50),
+    maxContextTokens: positiveInteger(values.RAG_MAX_CONTEXT_TOKENS, 'RAG_MAX_CONTEXT_TOKENS', 100000),
+    maxQuestionLength: positiveInteger(values.RAG_MAX_QUESTION_LENGTH, 'RAG_MAX_QUESTION_LENGTH', 10000),
+    enableStreaming: values.RAG_ENABLE_STREAMING.toLowerCase() === 'true'
+  };
   if (values.GITHUB_CALLBACK_URL) {
     let callbackUrl;
     try { callbackUrl = new URL(values.GITHUB_CALLBACK_URL); } catch {
@@ -116,6 +136,6 @@ export function validateEnv(source = process.env) {
     githubClientSecret: values.GITHUB_CLIENT_SECRET,
     githubCallbackUrl: values.GITHUB_CALLBACK_URL,
     sessionSecret: values.SESSION_SECRET,
-    indexing, embedding, search
+    indexing, embedding, search, llm, rag
   });
 }

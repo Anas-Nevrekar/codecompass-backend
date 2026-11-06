@@ -199,6 +199,14 @@ Parsing jobs, chunks, and per-file outcomes are stored in PostgreSQL. Chunks bel
 
 Run parser tests with `npm test`. Apply schema changes with `npm run db:deploy` in deployed environments or `npm run db:migrate` locally; no database reset is required.
 
+## Phase 6: grounded codebase question answering
+
+`POST /api/repositories/{repositoryId}/ask` accepts `{ "question": "...", "stream": false }`. It requires the existing session cookie and the configured frontend `Origin`. The endpoint reuses Phase 5 hybrid retrieval, then sends only the ranked source chunks that fit the configured context budget to Gemini. It validates returned citation IDs against those retrieved chunks and constructs paths, line ranges, and source from the stored chunk metadata. No conversation history is persisted; every question is stateless and retrieves fresh evidence.
+
+Configure `LLM_PROVIDER=gemini`, `LLM_API_KEY`, `LLM_MODEL=gemini-3.8-flash`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_REQUEST_TIMEOUT_MS`, and the `RAG_*` limits in `.env`. The Gemini key stays on the backend and is never returned to the client. Set `RAG_ENABLE_STREAMING=true` to allow `stream: true`; that request returns SSE events named `start`, `token`, `citations`, `complete`, and `error`. Citations and source locations are sent only after evidence-ID validation.
+
+Answer requests send the user's question and retrieved repository source code to Google's hosted Gemini API. Do not use this feature with confidential, private, proprietary, credential-containing, or otherwise sensitive repository content. Gemini free-tier eligibility and quotas can change; check Google's current [Gemini API pricing and limits](https://ai.google.dev/gemini-api/docs/pricing) and do not assume unlimited free usage. The selected model's context limits are documented in Google's [Gemini 3.8 Flash model reference](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash).
+
 ## Phase scope
 
-Phase 1 health/readiness and infrastructure behavior remains available. Phase 2 adds GitHub OAuth, persistent users, cookie sessions, URL validation, public repository metadata import, and user-scoped listing. Phase 3 adds background shallow cloning and persistent file inventory. Phase 4 adds AST parsing and code chunk persistence. Embeddings, search, LLM/RAG, and frontend implementation remain future work.
+Phase 1 health/readiness and infrastructure behavior remains available. Phase 2 adds GitHub OAuth, persistent users, cookie sessions, URL validation, public repository metadata import, and user-scoped listing. Phase 3 adds background shallow cloning and persistent file inventory. Phase 4 adds AST parsing and code chunk persistence. Phase 5 adds local embeddings and hybrid retrieval. Phase 6 adds stateless Gemini-backed, evidence-grounded question answering. Frontend implementation remains future work.
