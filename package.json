@@ -13,6 +13,8 @@
     "start": "node src/server.js",
     "worker": "node src/workers/indexing.worker.js",
     "parse-worker": "node src/workers/parsing.worker.js",
+    "embedding-worker": "node src/workers/embedding.worker.js",
+    "test:ollama": "node tests/ollama.integration.js",
     "test": "node --test",
     "db:generate": "prisma generate",
     "db:validate": "prisma validate",

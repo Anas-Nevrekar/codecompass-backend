@@ -12,6 +12,22 @@ CodeCompass is an AI-powered codebase onboarding assistant. This repository cont
 
 Repository import stores metadata only. This MVP does not clone or index source code and does not support private repositories.
 
+## Phase 5: embeddings and hybrid search
+
+Phase 5 embeds Phase 4 `CodeChunk` records with the local Ollama model `qwen3-embedding:0.6b` (1024 dimensions). Code documents include language, structure, symbol, relative path, and source. Search queries use the instruction prefix `Instruct: Given a question, retrieve relevant code snippets` followed by `Query: ...`. Ollama is called by the backend at `${EMBEDDING_BASE_URL}/api/embed`; the frontend never calls Ollama directly.
+
+PostgreSQL runs the pgvector-compatible `pgvector/pgvector:pg17` image. The migration enables the `vector` extension and creates a `vector(1024)` column. Prisma cannot expose this PostgreSQL type as a normal scalar, so a Prisma `Unsupported` field documents the schema and parameterized Prisma raw SQL handles inserts and cosine search. Search uses exact cosine distance (`<=>`) without an approximate index while repositories are small.
+
+Start the API and the embedding worker in separate terminals (`npm run dev` and `npm run embedding-worker`). After parsing, request `POST /api/repositories/:repositoryId/embeddings`, then poll `GET /api/embedding-jobs/:jobId`. The worker persists progress in PostgreSQL, batches up to 16 chunks by default, uses concurrency 1, and marks inputs over `EMBEDDING_MAX_INPUT_CHARS` as failed instead of silently truncating them. Redis/BullMQ carries only the embedding job ID. To check provider/model availability, use authenticated `GET /api/embeddings/health`; the check does not download the model. Install the model yourself with `ollama pull qwen3-embedding:0.6b` if it is missing.
+
+`POST /api/repositories/:repositoryId/search` accepts `{ "query": "Where is user authentication handled?", "limit": 10 }`. Vector search uses cosine distance, while keyword search combines PostgreSQL `websearch_to_tsquery('simple', ...)` with parameterized substring matching for identifiers and file paths. Results are merged by Reciprocal Rank Fusion: `score = Σ 1 / (60 + rank)`. The response contains code metadata, `vectorRank`, `keywordRank`, `rrfScore`, and `matchedBy`; it does not generate an LLM answer.
+
+Search is limited to the repository's latest successful parsing job. Embeddings belong to their source chunks and cascade away if those chunks are deleted during a later successful parse. Before calling Ollama, the worker copies an existing vector for an unchanged source hash, path, language, structure, symbol, and model configuration; changed or new chunks are embedded. If a newer parsing job has only partial success, it is treated as the latest completed parse, and search remains scoped to that parsing job.
+
+Apply schema changes with `npm run db:generate` and `npm run db:deploy`; these commands preserve existing records. For local Docker, PostgreSQL may need recreation with the new pgvector image while retaining the named `postgres_data` volume; do not use `docker compose down -v`. The embedding variables and deployment-friendly base URL are listed in `.env.example`; production can set `EMBEDDING_BASE_URL=http://ollama:11434` on a private Docker network and persist Ollama model files in a volume.
+
+Normal unit tests mock Ollama: `npm test`. The separate live check `npm run test:ollama` requires the configured model and running Ollama. No LLM is needed for vector search, keyword search, RRF, or the search endpoint.
+
 ## Prerequisites
 
 - Node.js 20 or newer and npm

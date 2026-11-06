@@ -46,6 +46,8 @@ model Repository {
   retainedStoragePath String?
   parsingJobs ParsingJob[]
   codeChunks CodeChunk[]
+  codeEmbeddings CodeEmbedding[]
+  embeddingJobs EmbeddingJob[]
 }
 
 model RepositoryImport {
@@ -153,6 +155,7 @@ model ParsingJob {
   indexingJob    IndexingJob   @relation(fields: [indexingJobId], references: [id], onDelete: Cascade)
   chunks         CodeChunk[]
   fileResults    ParsingFileResult[]
+  embeddingJobs  EmbeddingJob[]
   @@index([repositoryId, createdAt])
   @@index([status, createdAt])
 }
@@ -178,6 +181,7 @@ model CodeChunk {
   @@unique([parsingJobId, fileId, structureType, startLine, endLine, sourceHash])
   @@index([repositoryId, parsingJobId])
   @@index([fileId])
+  embeddings CodeEmbedding[]
 }
 
 model ParsingFileResult {
@@ -191,4 +195,51 @@ model ParsingFileResult {
   parsingJob   ParsingJob @relation(fields: [parsingJobId], references: [id], onDelete: Cascade)
   file         RepositoryFile @relation(fields: [fileId], references: [id], onDelete: Cascade)
   @@unique([parsingJobId, fileId])
+}
+
+enum EmbeddingStatus {
+  queued
+  processing
+  completed
+  completed_with_errors
+  failed
+}
+
+model EmbeddingJob {
+  id              String          @id @default(uuid()) @db.Uuid
+  repositoryId    String          @db.Uuid
+  parsingJobId    String          @db.Uuid
+  status          EmbeddingStatus @default(queued)
+  stage           String          @default("queued")
+  progress        Int             @default(0)
+  totalChunks     Int             @default(0)
+  processedChunks Int             @default(0)
+  embeddedChunks  Int             @default(0)
+  skippedChunks   Int             @default(0)
+  failedChunks    Int             @default(0)
+  errorMessage    String?
+  bullmqJobId     String          @unique
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  repository      Repository     @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  parsingJob      ParsingJob     @relation(fields: [parsingJobId], references: [id], onDelete: Cascade)
+  @@index([repositoryId, createdAt])
+  @@index([status, createdAt])
+}
+
+model CodeEmbedding {
+  id                  String     @id @default(uuid()) @db.Uuid
+  codeChunkId         String     @db.Uuid
+  repositoryId        String     @db.Uuid
+  embeddingModel      String
+  embeddingDimensions Int
+  embedding           Unsupported("vector(1024)")
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+  codeChunk           CodeChunk  @relation(fields: [codeChunkId], references: [id], onDelete: Cascade)
+  repository          Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  @@unique([codeChunkId, embeddingModel, embeddingDimensions])
+  @@index([repositoryId, embeddingModel, embeddingDimensions])
 }

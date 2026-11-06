@@ -15,7 +15,13 @@ const DEFAULTS = {
   INDEXING_TEMP_DIR: '',
   INDEXING_REPOSITORY_STORAGE_DIR: '',
   INDEXING_STALE_TEMP_DIR_AGE_HOURS: '24',
-  INDEXING_RECOVERY_INTERVAL_MS: '30000'
+  INDEXING_RECOVERY_INTERVAL_MS: '30000',
+  EMBEDDING_PROVIDER: 'ollama', EMBEDDING_BASE_URL: 'http://localhost:11434',
+  EMBEDDING_MODEL: 'qwen3-embedding:0.6b', EMBEDDING_DIMENSIONS: '1024', EMBEDDING_BATCH_SIZE: '16',
+  EMBEDDING_MAX_INPUT_CHARS: '100000',
+  EMBEDDING_WORKER_CONCURRENCY: '1', EMBEDDING_REQUEST_TIMEOUT_MS: '120000',
+  HYBRID_SEARCH_VECTOR_LIMIT: '20', HYBRID_SEARCH_KEYWORD_LIMIT: '20',
+  HYBRID_SEARCH_DEFAULT_LIMIT: '10', HYBRID_SEARCH_RRF_K: '60'
 };
 
 function positiveInteger(value, name, max = Number.MAX_SAFE_INTEGER) {
@@ -64,6 +70,27 @@ export function validateEnv(source = process.env) {
     staleTempDirAgeMs: positiveInteger(values.INDEXING_STALE_TEMP_DIR_AGE_HOURS, 'INDEXING_STALE_TEMP_DIR_AGE_HOURS', 720) * 60 * 60 * 1000,
     recoveryIntervalMs: positiveInteger(values.INDEXING_RECOVERY_INTERVAL_MS, 'INDEXING_RECOVERY_INTERVAL_MS', 3600000)
   };
+  if (values.EMBEDDING_PROVIDER !== 'ollama') throw new Error('EMBEDDING_PROVIDER must be ollama');
+  let embeddingBaseUrl;
+  try { embeddingBaseUrl = new URL(values.EMBEDDING_BASE_URL); } catch { throw new Error('EMBEDDING_BASE_URL must be a valid URL'); }
+  if (!['http:', 'https:'].includes(embeddingBaseUrl.protocol) || embeddingBaseUrl.username || embeddingBaseUrl.password || embeddingBaseUrl.search || embeddingBaseUrl.hash) throw new Error('EMBEDDING_BASE_URL must be an HTTP(S) base URL without credentials, query, or fragment');
+  const embedding = {
+    provider: values.EMBEDDING_PROVIDER,
+    baseUrl: embeddingBaseUrl.origin + embeddingBaseUrl.pathname.replace(/\/$/, ''),
+    model: values.EMBEDDING_MODEL,
+    dimensions: positiveInteger(values.EMBEDDING_DIMENSIONS, 'EMBEDDING_DIMENSIONS', 4096),
+    batchSize: positiveInteger(values.EMBEDDING_BATCH_SIZE, 'EMBEDDING_BATCH_SIZE', 128),
+    maxInputChars: positiveInteger(values.EMBEDDING_MAX_INPUT_CHARS, 'EMBEDDING_MAX_INPUT_CHARS', 1000000),
+    workerConcurrency: positiveInteger(values.EMBEDDING_WORKER_CONCURRENCY, 'EMBEDDING_WORKER_CONCURRENCY', 8),
+    requestTimeoutMs: positiveInteger(values.EMBEDDING_REQUEST_TIMEOUT_MS, 'EMBEDDING_REQUEST_TIMEOUT_MS', 600000)
+  };
+  if (!embedding.model.trim()) throw new Error('EMBEDDING_MODEL must not be empty');
+  const search = {
+    vectorLimit: positiveInteger(values.HYBRID_SEARCH_VECTOR_LIMIT, 'HYBRID_SEARCH_VECTOR_LIMIT', 100),
+    keywordLimit: positiveInteger(values.HYBRID_SEARCH_KEYWORD_LIMIT, 'HYBRID_SEARCH_KEYWORD_LIMIT', 100),
+    defaultLimit: positiveInteger(values.HYBRID_SEARCH_DEFAULT_LIMIT, 'HYBRID_SEARCH_DEFAULT_LIMIT', 50),
+    rrfK: positiveInteger(values.HYBRID_SEARCH_RRF_K, 'HYBRID_SEARCH_RRF_K', 1000)
+  };
   if (values.GITHUB_CALLBACK_URL) {
     let callbackUrl;
     try { callbackUrl = new URL(values.GITHUB_CALLBACK_URL); } catch {
@@ -89,6 +116,6 @@ export function validateEnv(source = process.env) {
     githubClientSecret: values.GITHUB_CLIENT_SECRET,
     githubCallbackUrl: values.GITHUB_CALLBACK_URL,
     sessionSecret: values.SESSION_SECRET,
-    indexing
+    indexing, embedding, search
   });
 }

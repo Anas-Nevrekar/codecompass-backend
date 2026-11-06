@@ -7,12 +7,16 @@ import { createAuthRouter } from './routes/auth.routes.js';
 import { createRepositoryRouter } from './routes/repository.routes.js';
 import { createIndexingJobRouter } from './routes/indexing-job.routes.js';
 import { createParsingRouter } from './routes/parsing.routes.js';
+import { createEmbeddingRouter } from './routes/embedding.routes.js';
+import { createOllamaEmbeddingService } from './services/ollama-embedding.service.js';
 
 export function createApp({
   prisma,
   redis,
   indexingQueue,
   parsingQueue,
+  embeddingQueue,
+  embeddingService,
   config = {},
   fetchImpl = globalThis.fetch,
   frontendUrl = 'http://localhost:5173',
@@ -48,6 +52,8 @@ export function createApp({
   app.use('/api/repositories', createRepositoryRouter({ prisma, indexingQueue, config: { ...config, frontendUrl, nodeEnv }, fetchImpl }));
   app.use('/api/indexing-jobs', createIndexingJobRouter({ prisma, config: { ...config, frontendUrl, nodeEnv } }));
   app.use('/api', createParsingRouter({ prisma, parsingQueue, config: { ...config, frontendUrl, nodeEnv } }));
+  if (!embeddingService && config.embedding) embeddingService = createOllamaEmbeddingService({ config: config.embedding, fetchImpl });
+  if (config.embedding && config.search) app.use('/api', createEmbeddingRouter({ prisma, embeddingQueue, embeddingService, config: { ...config, frontendUrl, nodeEnv } }));
   app.use(notFound);
   app.use(errorHandler);
   return app;
