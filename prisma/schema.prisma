@@ -44,6 +44,8 @@ model Repository {
   lastIndexedAt     DateTime?
   lastIndexedFileCount Int?
   retainedStoragePath String?
+  parsingJobs ParsingJob[]
+  codeChunks CodeChunk[]
 }
 
 model RepositoryImport {
@@ -91,6 +93,7 @@ model IndexingJob {
   repository            Repository     @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
   user                  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   files                 RepositoryFile[]
+  parsingJobs           ParsingJob[]
 
   @@index([status, createdAt])
   @@index([repositoryId, createdAt])
@@ -109,10 +112,83 @@ model RepositoryFile {
   updatedAt       DateTime     @updatedAt
   repository      Repository   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
   indexingJob     IndexingJob  @relation(fields: [indexingJobId], references: [id], onDelete: Cascade)
+  parsingResults ParsingFileResult[]
 
-  @@unique([repositoryId, relativePath])
+  @@unique([repositoryId, indexingJobId, relativePath])
   @@index([repositoryId])
   @@index([indexingJobId])
   @@index([extension])
   @@index([category])
+  codeChunks CodeChunk[]
+}
+
+enum ParsingStatus {
+  queued
+  processing
+  completed
+  completed_with_errors
+  failed
+}
+
+model ParsingJob {
+  id             String        @id @default(uuid()) @db.Uuid
+  repositoryId   String        @db.Uuid
+  indexingJobId  String        @db.Uuid
+  status         ParsingStatus @default(queued)
+  stage          String        @default("queued")
+  progress       Int           @default(0)
+  totalFiles     Int           @default(0)
+  processedFiles Int           @default(0)
+  parsedFiles    Int           @default(0)
+  skippedFiles   Int           @default(0)
+  failedFiles    Int           @default(0)
+  totalChunks    Int           @default(0)
+  errorMessage   String?
+  bullmqJobId    String        @unique
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  repository     Repository    @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  indexingJob    IndexingJob   @relation(fields: [indexingJobId], references: [id], onDelete: Cascade)
+  chunks         CodeChunk[]
+  fileResults    ParsingFileResult[]
+  @@index([repositoryId, createdAt])
+  @@index([status, createdAt])
+}
+
+model CodeChunk {
+  id           String      @id @default(uuid()) @db.Uuid
+  parsingJobId String      @db.Uuid
+  repositoryId String      @db.Uuid
+  fileId       String      @db.Uuid
+  relativePath String
+  language     String
+  structureType String
+  symbolName   String?
+  startLine    Int
+  endLine      Int
+  source       String      @db.Text
+  metadata     Json        @default("{}")
+  sourceHash   String
+  createdAt    DateTime    @default(now())
+  parsingJob   ParsingJob  @relation(fields: [parsingJobId], references: [id], onDelete: Cascade)
+  repository   Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  file         RepositoryFile @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  @@unique([parsingJobId, fileId, structureType, startLine, endLine, sourceHash])
+  @@index([repositoryId, parsingJobId])
+  @@index([fileId])
+}
+
+model ParsingFileResult {
+  id           String     @id @default(uuid()) @db.Uuid
+  parsingJobId String     @db.Uuid
+  fileId       String     @db.Uuid
+  status       String
+  errorMessage String?
+  chunkCount   Int        @default(0)
+  createdAt    DateTime   @default(now())
+  parsingJob   ParsingJob @relation(fields: [parsingJobId], references: [id], onDelete: Cascade)
+  file         RepositoryFile @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  @@unique([parsingJobId, fileId])
 }

@@ -158,9 +158,9 @@ test('queue publication failure leaves the PostgreSQL job queued for recovery', 
   } finally { console.error = originalError; }
 });
 
-test('inventory replacement commits the latest files atomically and preserves the old inventory on failure', async () => {
+test('inventory replacement versions the new files and preserves prior inventory on failure', async () => {
   const state = {
-    files: [{ repositoryId, indexingJobId: 'old-job', relativePath: 'old.js', extension: '.js', category: 'source', sizeBytes: 3n }],
+    files: [{ repositoryId, indexingJobId: 'old-job', relativePath: 'src/new.js', extension: '.js', category: 'source', sizeBytes: 3n }],
     repository: { lastIndexedCommitSha: 'old-commit', lastIndexedFileCount: 1, retainedStoragePath: `repositories/${repositoryId}/84fef64d-aeb8-43ec-a8db-5f84dba56388` },
     job: { status: 'saving_inventory', progress: 90 }
   };
@@ -170,7 +170,6 @@ test('inventory replacement commits the latest files atomically and preserves th
       const working = structuredClone(state);
       const tx = {
         repositoryFile: {
-          async deleteMany() { working.files = []; },
           async createMany({ data }) {
             if (failInsert) throw new Error('simulated insert failure');
             working.files.push(...data);
@@ -191,7 +190,8 @@ test('inventory replacement commits the latest files atomically and preserves th
   const counts = { discoveredFileCount: 3, eligibleFileCount: 2, excludedFileCount: 1 };
   const newStoragePath = `repositories/${repositoryId}/7168c9df-f906-4f00-af5b-19da0c0838af`;
   await replaceRepositoryInventory({ prisma, indexingJobId: 'new-job', repositoryId, files, counts, commitSha: 'new-commit', retainedStoragePath: newStoragePath });
-  assert.deepEqual(state.files.map((file) => file.relativePath).sort(), ['README.md', 'src/new.js']);
+  assert.deepEqual(state.files.map((file) => file.relativePath).sort(), ['README.md', 'src/new.js', 'src/new.js']);
+  assert.deepEqual(state.files.filter((file) => file.relativePath === 'src/new.js').map((file) => file.indexingJobId).sort(), ['new-job', 'old-job']);
   assert.ok(state.files.every((file) => !Object.hasOwn(file, 'contents')));
   assert.equal(state.repository.lastIndexedCommitSha, 'new-commit');
   assert.equal(state.repository.retainedStoragePath, newStoragePath);

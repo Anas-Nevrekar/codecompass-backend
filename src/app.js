@@ -6,11 +6,13 @@ import { errorHandler } from './middleware/error-handler.js';
 import { createAuthRouter } from './routes/auth.routes.js';
 import { createRepositoryRouter } from './routes/repository.routes.js';
 import { createIndexingJobRouter } from './routes/indexing-job.routes.js';
+import { createParsingRouter } from './routes/parsing.routes.js';
 
 export function createApp({
   prisma,
   redis,
   indexingQueue,
+  parsingQueue,
   config = {},
   fetchImpl = globalThis.fetch,
   frontendUrl = 'http://localhost:5173',
@@ -45,6 +47,7 @@ export function createApp({
   app.use('/api/auth', createAuthRouter({ prisma, config: { ...config, frontendUrl, nodeEnv }, fetchImpl }));
   app.use('/api/repositories', createRepositoryRouter({ prisma, indexingQueue, config: { ...config, frontendUrl, nodeEnv }, fetchImpl }));
   app.use('/api/indexing-jobs', createIndexingJobRouter({ prisma, config: { ...config, frontendUrl, nodeEnv } }));
+  app.use('/api', createParsingRouter({ prisma, parsingQueue, config: { ...config, frontendUrl, nodeEnv } }));
   app.use(notFound);
   app.use(errorHandler);
   return app;

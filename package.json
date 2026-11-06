@@ -12,6 +12,7 @@
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "worker": "node src/workers/indexing.worker.js",
+    "parse-worker": "node src/workers/parsing.worker.js",
     "test": "node --test",
     "db:generate": "prisma generate",
     "db:validate": "prisma validate",
@@ -28,7 +29,11 @@
     "express": "^5.1.0",
     "express-rate-limit": "^8.7.1",
     "ioredis": "^5.7.0",
-    "jose": "^6.2.12"
+    "jose": "^6.2.12",
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-javascript": "^0.23.1",
+    "tree-sitter-python": "^0.23.4",
+    "tree-sitter-typescript": "^0.23.2"
   },
   "devDependencies": {
     "prisma": "^6.19.0",

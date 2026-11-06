@@ -1,6 +1,5 @@
 export async function replaceRepositoryInventory({ prisma, indexingJobId, repositoryId, files, counts, commitSha, retainedStoragePath }) {
   return prisma.$transaction(async (tx) => {
-    await tx.repositoryFile.deleteMany({ where: { repositoryId } });
     for (let offset = 0; offset < files.length; offset += 500) {
       await tx.repositoryFile.createMany({
         data: files.slice(offset, offset + 500).map((file) => ({
