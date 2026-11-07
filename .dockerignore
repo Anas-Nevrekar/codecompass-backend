@@ -1,0 +1,27 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Dependencies and source control
+node_modules
+.git
+.github
+
+# Local data, generated artifacts, and tests
+codecompass-repository-storage
+repositories
+coverage
+tests
+work
+outputs
+dist
+docs
+
+# Logs and temporary files
+*.log
+npm-debug.log*
+.DS_Store
+.cache
+tmp
+temp
