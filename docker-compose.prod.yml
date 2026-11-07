@@ -1,0 +1,154 @@
+name: codecompass-production
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env.production}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env.production}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.production}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-1g}
+    cpus: ${POSTGRES_CPUS:-1.0}
+    networks: [private]
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    mem_limit: ${REDIS_MEMORY_LIMIT:-256m}
+    cpus: ${REDIS_CPUS:-0.5}
+    networks: [private]
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes: [ollama_data:/root/.ollama]
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    mem_limit: ${OLLAMA_MEMORY_LIMIT:-4g}
+    cpus: ${OLLAMA_CPUS:-2.0}
+    networks: [private, outbound]
+  ollama-model-pull:
+    image: ollama/ollama:latest
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama pull \"$$EMBEDDING_MODEL\""]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding:0.6b}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks: [private, outbound]
+  migrate:
+    image: ${CODECOMPASS_IMAGE:-codecompass-backend:step1}
+    restart: "no"
+    env_file: [.env.production]
+    command: ["npm", "run", "db:deploy"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [private]
+  api:
+    image: ${CODECOMPASS_IMAGE:-codecompass-backend:step1}
+    restart: unless-stopped
+    init: true
+    env_file: [.env.production]
+    command: ["npm", "start"]
+    expose: ["3000"]
+    volumes: [repository_storage:/var/lib/codecompass/repository-storage]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ollama-model-pull:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: ${API_MEMORY_LIMIT:-768m}
+    cpus: ${API_CPUS:-1.0}
+    networks: [private, outbound]
+  indexing-worker:
+    image: ${CODECOMPASS_IMAGE:-codecompass-backend:step1}
+    restart: unless-stopped
+    init: true
+    env_file: [.env.production]
+    command: ["npm", "run", "worker"]
+    volumes: [repository_storage:/var/lib/codecompass/repository-storage]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    mem_limit: ${INDEXING_MEMORY_LIMIT:-1g}
+    cpus: ${INDEXING_CPUS:-1.0}
+    networks: [private, outbound]
+  parsing-worker:
+    image: ${CODECOMPASS_IMAGE:-codecompass-backend:step1}
+    restart: unless-stopped
+    init: true
+    env_file: [.env.production]
+    command: ["npm", "run", "parse-worker"]
+    volumes: [repository_storage:/var/lib/codecompass/repository-storage]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    mem_limit: ${PARSING_MEMORY_LIMIT:-768m}
+    cpus: ${PARSING_CPUS:-1.0}
+    networks: [private]
+  embedding-worker:
+    image: ${CODECOMPASS_IMAGE:-codecompass-backend:step1}
+    restart: unless-stopped
+    init: true
+    env_file: [.env.production]
+    command: ["npm", "run", "embedding-worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ollama-model-pull:
+        condition: service_completed_successfully
+    mem_limit: ${EMBEDDING_WORKER_MEMORY_LIMIT:-1g}
+    cpus: ${EMBEDDING_WORKER_CPUS:-1.0}
+    networks: [private]
+volumes:
+  postgres_data:
+  redis_data:
+  ollama_data:
+  repository_storage:
+networks:
+  private:
+    internal: true
+  outbound:
+    driver: bridge

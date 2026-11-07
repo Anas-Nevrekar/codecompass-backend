@@ -568,9 +568,19 @@ Use `docker compose up -d` to start dependencies and `docker compose ps` to insp
 
 ## Deployment considerations
 
-The repositories provide local development configuration, backend startup scripts, migrations, and Docker Compose for PostgreSQL and Redis. A production deployment topology is not defined by the codebase. Treat any deployment plan as an operator responsibility, not an already deployed feature.
+A separate single-host production Compose configuration is provided in `docker-compose.prod.yml`; it does not alter the local development `docker-compose.yml`. This is deployment configuration, not a claim that CodeCompass is deployed. It defines the API, three workers, PostgreSQL with pgvector, Redis, Ollama, an Ollama model-pull job, and a one-shot Prisma migration job.
 
-A production setup needs durable PostgreSQL storage with pgvector, Redis reachable by the API and workers, persistent clone storage accessible to the parsing worker, an Ollama service with the configured model, and network access from the backend to Gemini. BullMQ workers need a persistent process runtime; a request-only/serverless process will not reliably drain queues. Keep databases, Redis, Ollama, clone storage, and secrets private. Use HTTPS, restrict inbound access, back up persistent data, and configure resource limits appropriate to repository clone and parsing work. The current configuration assumes API and workers can access the same repository storage path.
+### Production Compose setup
+
+From `codecompass-backend`, copy `.env.production.example` to `.env.production`, replace all placeholders, and keep `.env.production` private. Use the same URL-safe database password in `POSTGRES_PASSWORD` and `DATABASE_URL`. Set `FRONTEND_URL` to the exact HTTPS frontend origin and `GITHUB_CALLBACK_URL` to the public API callback URL. `SESSION_SECRET` must contain at least 32 bytes. The configured GitHub OAuth application and Gemini key must be valid.
+
+The backend image defaults to `codecompass-backend:step1`; set `CODECOMPASS_IMAGE` in the Compose interpolation environment when using a separately tagged/published image. Bring up the stack with `docker compose --env-file .env.production -f docker-compose.prod.yml up -d`. The app containers wait for PostgreSQL and Redis health, successful migrations, and the embedding model pull where required. `migrate` runs `npm run db:deploy` once; do not run migrations separately in each application service. To re-run migrations after a release, run `docker compose --env-file .env.production -f docker-compose.prod.yml run --rm migrate`.
+
+The named volumes `postgres_data`, `redis_data`, `ollama_data`, and `repository_storage` retain database files, BullMQ AOF data, model files, and cloned repositories. The API, indexing worker, and parsing worker share `/var/lib/codecompass/repository-storage`. The `private` network is internal; a separate outbound bridge gives API/indexing and model download the egress they need while PostgreSQL and Redis remain private. API port 3000 is only exposed to attached containers so a future reverse proxy can connect; no host port is published.
+
+`ollama-model-pull` downloads `qwen3-embedding:0.6b` into the persistent Ollama volume on startup when required. The Ollama service has a substantial default memory cap, and the Compose resource values in `.env.production` must be chosen for the actual EC2 architecture and available RAM/CPU. The sample caps total about 8.8 GiB of memory before operating-system overhead; a small instance is not suitable without reducing concurrency/resources and checking model performance. Build for one architecture locally with `PLATFORMS=linux/arm64 docker buildx bake backend --load`; publish a multi-platform image with `IMAGE=registry.example.com/codecompass/backend:tag docker buildx bake backend --push` (the default platforms are `linux/amd64,linux/arm64`). Multi-platform images should be published to a registry; a local Docker daemon generally cannot `--load` a multi-platform manifest.
+
+Keep the host firewall limited to the future reverse proxy and administration needs. Use HTTPS at that proxy, store production secrets outside source control, and back up the persistent volumes.
 
 ## Limitations and future improvements
 
