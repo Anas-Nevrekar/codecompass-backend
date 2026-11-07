@@ -1,4 +1,5 @@
 import { formatSearchQuery } from './ollama-embedding.service.js';
+import { DEFAULT_QUERY_TASK } from './gemini-embedding.service.js';
 
 export function fuseRankedResults(vectorResults, keywordResults, { k = 60, limit = 10 } = {}) {
   const combined = new Map();
@@ -21,6 +22,7 @@ export function fuseRankedResults(vectorResults, keywordResults, { k = 60, limit
 }
 
 export async function vectorSearch({ prisma, repositoryId, parsingJobId, model, dimensions, vector, limit }) {
+  if (!Array.isArray(vector) || vector.length !== dimensions || !vector.every((item) => Number.isFinite(item))) throw new Error(`Query embedding must contain ${dimensions} finite values.`);
   const value = `[${vector.join(',')}]`;
   return prisma.$queryRaw`
     SELECT c."id" AS "chunkId", c."relativePath" AS "filePath", c."language", c."structureType", c."symbolName", c."startLine", c."endLine", c."source" AS "sourceCode", c."metadata", e."embedding" <=> ${value}::vector AS distance
@@ -53,7 +55,7 @@ export async function hybridSearch({ prisma, embeddingService, config, repositor
   if (!parsingJob) return { unavailable: true };
   const embeddingCount = await prisma.codeEmbedding.count({ where: { repositoryId, embeddingModel: config.embedding.model, embeddingDimensions: config.embedding.dimensions, codeChunk: { parsingJobId: parsingJob.id } } });
   if (!embeddingCount) return { embeddingsMissing: true };
-  const queryVector = await embeddingService.embedOne(formatSearchQuery(query));
+  const queryVector = await embeddingService.embedOne(formatSearchQuery(query), { taskType: DEFAULT_QUERY_TASK });
   const [vectors, keywords] = await Promise.all([
     vectorSearch({ prisma, repositoryId, parsingJobId: parsingJob.id, model: config.embedding.model, dimensions: config.embedding.dimensions, vector: queryVector, limit: config.search.vectorLimit }),
     keywordSearch({ prisma, repositoryId, parsingJobId: parsingJob.id, query, limit: config.search.keywordLimit })

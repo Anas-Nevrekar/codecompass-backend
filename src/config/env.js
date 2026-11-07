@@ -18,6 +18,7 @@ const DEFAULTS = {
   INDEXING_RECOVERY_INTERVAL_MS: '30000',
   EMBEDDING_PROVIDER: 'ollama', EMBEDDING_BASE_URL: 'http://localhost:11434',
   EMBEDDING_MODEL: 'qwen3-embedding:0.6b', EMBEDDING_DIMENSIONS: '1024', EMBEDDING_BATCH_SIZE: '16',
+  GEMINI_API_KEY: '',
   EMBEDDING_MAX_INPUT_CHARS: '100000',
   EMBEDDING_WORKER_CONCURRENCY: '1', EMBEDDING_REQUEST_TIMEOUT_MS: '120000',
   HYBRID_SEARCH_VECTOR_LIMIT: '20', HYBRID_SEARCH_KEYWORD_LIMIT: '20',
@@ -74,13 +75,16 @@ export function validateEnv(source = process.env) {
     staleTempDirAgeMs: positiveInteger(values.INDEXING_STALE_TEMP_DIR_AGE_HOURS, 'INDEXING_STALE_TEMP_DIR_AGE_HOURS', 720) * 60 * 60 * 1000,
     recoveryIntervalMs: positiveInteger(values.INDEXING_RECOVERY_INTERVAL_MS, 'INDEXING_RECOVERY_INTERVAL_MS', 3600000)
   };
-  if (values.EMBEDDING_PROVIDER !== 'ollama') throw new Error('EMBEDDING_PROVIDER must be ollama');
-  let embeddingBaseUrl;
-  try { embeddingBaseUrl = new URL(values.EMBEDDING_BASE_URL); } catch { throw new Error('EMBEDDING_BASE_URL must be a valid URL'); }
-  if (!['http:', 'https:'].includes(embeddingBaseUrl.protocol) || embeddingBaseUrl.username || embeddingBaseUrl.password || embeddingBaseUrl.search || embeddingBaseUrl.hash) throw new Error('EMBEDDING_BASE_URL must be an HTTP(S) base URL without credentials, query, or fragment');
+  if (!['ollama', 'gemini'].includes(values.EMBEDDING_PROVIDER)) throw new Error('EMBEDDING_PROVIDER must be ollama or gemini');
+  let embeddingBaseUrl = '';
+  if (values.EMBEDDING_PROVIDER === 'ollama') {
+    try { embeddingBaseUrl = new URL(values.EMBEDDING_BASE_URL); } catch { throw new Error('EMBEDDING_BASE_URL must be a valid URL'); }
+    if (!['http:', 'https:'].includes(embeddingBaseUrl.protocol) || embeddingBaseUrl.username || embeddingBaseUrl.password || embeddingBaseUrl.search || embeddingBaseUrl.hash) throw new Error('EMBEDDING_BASE_URL must be an HTTP(S) base URL without credentials, query, or fragment');
+  }
+  const geminiApiKey = values.GEMINI_API_KEY || values.LLM_API_KEY;
   const embedding = {
     provider: values.EMBEDDING_PROVIDER,
-    baseUrl: embeddingBaseUrl.origin + embeddingBaseUrl.pathname.replace(/\/$/, ''),
+    ...(values.EMBEDDING_PROVIDER === 'ollama' ? { baseUrl: embeddingBaseUrl.origin + embeddingBaseUrl.pathname.replace(/\/$/, '') } : { apiKey: geminiApiKey }),
     model: values.EMBEDDING_MODEL,
     dimensions: positiveInteger(values.EMBEDDING_DIMENSIONS, 'EMBEDDING_DIMENSIONS', 4096),
     batchSize: positiveInteger(values.EMBEDDING_BATCH_SIZE, 'EMBEDDING_BATCH_SIZE', 128),
@@ -98,7 +102,7 @@ export function validateEnv(source = process.env) {
   if (values.LLM_PROVIDER !== 'gemini') throw new Error('LLM_PROVIDER must be gemini');
   const llm = {
     provider: values.LLM_PROVIDER,
-    apiKey: values.LLM_API_KEY,
+    apiKey: geminiApiKey,
     model: values.LLM_MODEL,
     maxOutputTokens: positiveInteger(values.LLM_MAX_OUTPUT_TOKENS, 'LLM_MAX_OUTPUT_TOKENS', 8192),
     requestTimeoutMs: positiveInteger(values.LLM_REQUEST_TIMEOUT_MS, 'LLM_REQUEST_TIMEOUT_MS', 300000)

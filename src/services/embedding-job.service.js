@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { bullmqJobIdForEmbeddingJob } from '../lib/embedding-queue.js';
 import { formatCodeChunk } from './ollama-embedding.service.js';
+import { DEFAULT_DOCUMENT_TASK } from './gemini-embedding.service.js';
 
 const ACTIVE = ['queued', 'processing'];
 const SUCCESSFUL_PARSE = ['completed', 'completed_with_errors'];
@@ -80,7 +81,7 @@ export async function recoverQueuedEmbeddingJobs({ prisma, queue, now = Date.now
 export function createEmbeddingProcessor({ prisma, embeddingService, config }) {
   return async ({ data }) => {
     const job = await prisma.embeddingJob.findUnique({ where: { id: data?.embeddingJobId } });
-    if (!job || ['completed', 'completed_with_errors'].includes(job.status)) return;
+    if (!job || !['queued', 'processing'].includes(job.status)) return;
     const repository = prisma.repository?.findUnique ? await prisma.repository.findUnique({ where: { id: job.repositoryId }, select: { deletionRequestedAt: true } }) : null;
     if (prisma.repository?.findUnique && (!repository || repository.deletionRequestedAt)) return;
     await prisma.embeddingJob.update({ where: { id: job.id }, data: { status: 'processing', stage: 'loading_chunks', startedAt: job.startedAt ?? new Date(), errorMessage: null } });
@@ -89,6 +90,8 @@ export function createEmbeddingProcessor({ prisma, embeddingService, config }) {
     let cursor;
     let processedChunks = 0, embeddedChunks = 0, skippedChunks = 0, failedChunks = 0;
     while (true) {
+      const currentJob = await prisma.embeddingJob.findUnique({ where: { id: job.id }, select: { status: true } });
+      if (!currentJob || !['queued', 'processing'].includes(currentJob.status)) return;
       const currentRepository = prisma.repository?.findUnique ? await prisma.repository.findUnique({ where: { id: job.repositoryId }, select: { deletionRequestedAt: true } }) : null;
       if (prisma.repository?.findUnique && (!currentRepository || currentRepository.deletionRequestedAt)) return;
       const chunks = await prisma.codeChunk.findMany({ where: { parsingJobId: job.parsingJobId, ...(cursor ? { id: { gt: cursor } } : {}) }, orderBy: { id: 'asc' }, take: config.embedding.batchSize, include: { embeddings: { where: { embeddingModel: config.embedding.model, embeddingDimensions: config.embedding.dimensions }, select: { id: true } } } });
@@ -115,7 +118,12 @@ export function createEmbeddingProcessor({ prisma, embeddingService, config }) {
       if (pending.length) {
         await prisma.embeddingJob.update({ where: { id: job.id }, data: { stage: 'generating_embeddings' } });
         try {
-          const vectors = await embeddingService.embed(pending.map(formatCodeChunk));
+          const vectors = await embeddingService.embed(pending.map(formatCodeChunk), { taskType: DEFAULT_DOCUMENT_TASK });
+          if (!Array.isArray(vectors) || vectors.length !== pending.length || vectors.some((vector) => !Array.isArray(vector) || vector.length !== config.embedding.dimensions || !vector.every((value) => Number.isFinite(value)))) {
+            throw new Error(`Embedding provider returned invalid vectors; expected ${config.embedding.dimensions} finite values per chunk.`);
+          }
+          const currentJob = await prisma.embeddingJob.findUnique({ where: { id: job.id }, select: { status: true } });
+          if (!currentJob || !['queued', 'processing'].includes(currentJob.status)) return;
           await prisma.embeddingJob.update({ where: { id: job.id }, data: { stage: 'saving_embeddings' } });
           for (let i = 0; i < pending.length; i++) {
             const vector = `[${vectors[i].join(',')}]`;

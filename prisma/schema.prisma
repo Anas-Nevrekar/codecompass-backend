@@ -254,7 +254,7 @@ model CodeEmbedding {
   repositoryId        String     @db.Uuid
   embeddingModel      String
   embeddingDimensions Int
-  embedding           Unsupported("vector(1024)")
+  embedding           Unsupported("vector(768)")
   createdAt           DateTime   @default(now())
   updatedAt           DateTime   @updatedAt
   codeChunk           CodeChunk  @relation(fields: [codeChunkId], references: [id], onDelete: Cascade)

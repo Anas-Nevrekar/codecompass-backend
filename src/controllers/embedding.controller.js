@@ -42,7 +42,7 @@ export function createEmbeddingController({ prisma, embeddingQueue, embeddingSer
       }
     },
     async health(_req, res, next) {
-      try { res.json({ success: true, ollama: await embeddingService.health() }); } catch (error) { next(new HttpError(503, 'OLLAMA_UNAVAILABLE', error.message)); }
+      try { res.json({ success: true, provider: config.embedding.provider, embedding: await embeddingService.health() }); } catch (error) { next(new HttpError(503, 'EMBEDDING_PROVIDER_UNAVAILABLE', error.message)); }
     }
   };
 }

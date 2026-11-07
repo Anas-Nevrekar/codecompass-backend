@@ -30,31 +30,6 @@ services:
     mem_limit: ${REDIS_MEMORY_LIMIT:-256m}
     cpus: ${REDIS_CPUS:-0.5}
     networks: [private]
-  ollama:
-    image: ollama/ollama:latest
-    restart: unless-stopped
-    volumes: [ollama_data:/root/.ollama]
-    healthcheck:
-      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 30s
-    mem_limit: ${OLLAMA_MEMORY_LIMIT:-4g}
-    cpus: ${OLLAMA_CPUS:-2.0}
-    networks: [private, outbound]
-  ollama-model-pull:
-    image: ollama/ollama:latest
-    restart: "no"
-    entrypoint: ["/bin/sh", "-c"]
-    command: ["ollama pull \"$$EMBEDDING_MODEL\""]
-    environment:
-      OLLAMA_HOST: http://ollama:11434
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding:0.6b}
-    depends_on:
-      ollama:
-        condition: service_healthy
-    networks: [private, outbound]
   migrate:
     image: ${CODECOMPASS_IMAGE:-codecompass-backend:step1}
     restart: "no"
@@ -78,8 +53,6 @@ services:
       redis:
         condition: service_healthy
       migrate:
-        condition: service_completed_successfully
-      ollama-model-pull:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -137,15 +110,12 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-      ollama-model-pull:
-        condition: service_completed_successfully
     mem_limit: ${EMBEDDING_WORKER_MEMORY_LIMIT:-1g}
     cpus: ${EMBEDDING_WORKER_CPUS:-1.0}
-    networks: [private]
+    networks: [private, outbound]
 volumes:
   postgres_data:
   redis_data:
-  ollama_data:
   repository_storage:
 networks:
   private:
