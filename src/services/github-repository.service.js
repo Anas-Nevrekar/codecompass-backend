@@ -104,6 +104,9 @@ export async function importRepositoryForUser({ prisma, userId, metadata }) {
         metadataUpdatedAt: metadata.metadataUpdatedAt
       }
     });
+    if (repository.deletionRequestedAt) {
+      throw new HttpError(409, 'REPOSITORY_DELETING', 'This repository is being removed. Try importing it again shortly.');
+    }
     const insertion = await tx.repositoryImport.createMany({
       data: [{ userId, repositoryId: repository.id }],
       skipDuplicates: true

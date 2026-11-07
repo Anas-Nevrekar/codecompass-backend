@@ -9,7 +9,8 @@
   },
   "scripts": {
     "postinstall": "prisma generate",
-    "dev": "node --watch src/server.js",
+    "dev": "node src/dev.js",
+    "dev:api": "node --watch src/server.js",
     "start": "node src/server.js",
     "worker": "node src/workers/indexing.worker.js",
     "parse-worker": "node src/workers/parsing.worker.js",

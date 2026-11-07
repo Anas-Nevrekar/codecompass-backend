@@ -8,6 +8,9 @@ import { recoverQueuedIndexingJobs } from '../services/indexing-job.service.js';
 import { createIndexingProcessor, markIndexingJobFailed } from '../services/indexing-worker.service.js';
 import { cleanUnreferencedRetainedClones, prepareRepositoryStorageRoot } from '../services/retained-repository-storage.service.js';
 import { validateEnv } from '../config/env.js';
+import { createParsingQueue } from '../lib/parsing-queue.js';
+import { createEmbeddingQueue } from '../lib/embedding-queue.js';
+import { advanceRepositoryPipeline, recoverRepositoryPipeline } from '../services/processing-pipeline.service.js';
 
 const config = validateEnv();
 const indexingConfig = config.indexing;
@@ -19,6 +22,8 @@ const connection = new Redis(config.redisUrl, {
   maxRetriesPerRequest: null,
   retryStrategy: (attempt) => Math.min(attempt * 250, 3000)
 });
+const { queue: parsingQueue, connection: parsingRedis } = createParsingQueue(config.redisUrl);
+const { queue: embeddingQueue, connection: embeddingRedis } = createEmbeddingQueue(config.redisUrl);
 
 const processIndexingJob = createIndexingProcessor({ prisma, indexingConfig });
 
@@ -38,7 +43,11 @@ const worker = new Worker(INDEXING_QUEUE_NAME, processIndexingJob, {
 });
 
 worker.on('ready', () => console.info('Repository indexing worker is ready', { concurrency: indexingConfig.workerConcurrency }));
-worker.on('completed', (job) => console.info('Indexing queue job completed', { queueJobId: job.id }));
+worker.on('completed', (job) => {
+  console.info('Indexing queue job completed', { queueJobId: job.id });
+  void advanceRepositoryPipeline({ prisma, parsingQueue, embeddingQueue, indexingConfig, config, indexingJobId: job.data.indexingJobId })
+    .catch((error) => console.error('Could not advance repository processing after indexing', { code: error.code ?? 'PIPELINE_ERROR' }));
+});
 worker.on('failed', async (job, error) => {
   if (!job) return;
   console.warn('Indexing queue job failed', { queueJobId: job.id, attempt: job.attemptsMade });
@@ -53,12 +62,16 @@ const recoveryQueue = new Queue(INDEXING_QUEUE_NAME, { connection: connection.du
 await recoverQueuedIndexingJobs({ prisma, queue: recoveryQueue }).catch((error) => {
   console.error('Initial indexing queue recovery will retry later', { code: error.code ?? 'RECOVERY_ERROR' });
 });
+await recoverRepositoryPipeline({ prisma, parsingQueue, embeddingQueue, indexingConfig, config })
+  .catch((error) => console.error('Initial repository processing recovery will retry later', { code: error.code ?? 'PIPELINE_RECOVERY_ERROR' }));
 const recoveryTimer = setInterval(() => {
   void recoverQueuedIndexingJobs({ prisma, queue: recoveryQueue }).catch((error) => {
     console.error('Indexing queue recovery will retry later', { code: error.code ?? 'RECOVERY_ERROR' });
   });
   void cleanStaleIndexingDirectories({ tempDir: indexingConfig.tempDir, staleAgeMs: indexingConfig.staleTempDirAgeMs })
     .catch(() => console.error('Stale indexing temporary directory cleanup failed'));
+  void recoverRepositoryPipeline({ prisma, parsingQueue, embeddingQueue, indexingConfig, config })
+    .catch((error) => console.error('Repository processing recovery will retry later', { code: error.code ?? 'PIPELINE_RECOVERY_ERROR' }));
 }, indexingConfig.recoveryIntervalMs);
 recoveryTimer.unref();
 
@@ -68,7 +81,7 @@ async function shutdown(signal) {
   shuttingDown = true;
   console.info(`Stopping indexing worker after ${signal}`);
   clearInterval(recoveryTimer);
-  await Promise.allSettled([worker.close(), recoveryQueue.close(), connection.quit(), prisma.$disconnect()]);
+  await Promise.allSettled([worker.close(), recoveryQueue.close(), connection.quit(), parsingQueue.close(), parsingRedis.quit(), embeddingQueue.close(), embeddingRedis.quit(), prisma.$disconnect()]);
   process.exit(0);
 }
 process.on('SIGINT', () => void shutdown('SIGINT'));

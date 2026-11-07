@@ -18,6 +18,7 @@ model User {
   updatedAt      DateTime           @updatedAt
   repositories   RepositoryImport[]
   indexingJobs   IndexingJob[]
+  readingProgress ReadingProgress[]
 }
 
 model Repository {
@@ -44,10 +45,28 @@ model Repository {
   lastIndexedAt     DateTime?
   lastIndexedFileCount Int?
   retainedStoragePath String?
+  deletionRequestedAt DateTime?
   parsingJobs ParsingJob[]
   codeChunks CodeChunk[]
   codeEmbeddings CodeEmbedding[]
   embeddingJobs EmbeddingJob[]
+  readingProgress ReadingProgress[]
+}
+
+model ReadingProgress {
+  id             String     @id @default(uuid()) @db.Uuid
+  userId         String     @db.Uuid
+  repositoryId   String     @db.Uuid
+  parsingJobId   String     @db.Uuid
+  activeStageId  String?
+  statusByStage  Json       @default("{}")
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  repository     Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, repositoryId])
+  @@index([repositoryId, parsingJobId])
 }
 
 model RepositoryImport {

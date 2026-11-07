@@ -11,6 +11,7 @@ import { createEmbeddingRouter } from './routes/embedding.routes.js';
 import { createOllamaEmbeddingService } from './services/ollama-embedding.service.js';
 import { createAskRouter } from './routes/ask.routes.js';
 import { createGeminiLlmService } from './services/gemini-llm.service.js';
+import { createCodeExplorerRouter } from './routes/code-explorer.routes.js';
 
 export function createApp({
   prisma,
@@ -52,9 +53,10 @@ export function createApp({
   }
   app.use('/api', createHealthRouter({ prisma, redis }));
   app.use('/api/auth', createAuthRouter({ prisma, config: { ...config, frontendUrl, nodeEnv }, fetchImpl }));
-  app.use('/api/repositories', createRepositoryRouter({ prisma, indexingQueue, config: { ...config, frontendUrl, nodeEnv }, fetchImpl }));
+  app.use('/api/repositories', createRepositoryRouter({ prisma, indexingQueue, parsingQueue, embeddingQueue, config: { ...config, frontendUrl, nodeEnv }, fetchImpl }));
   app.use('/api/indexing-jobs', createIndexingJobRouter({ prisma, config: { ...config, frontendUrl, nodeEnv } }));
   app.use('/api', createParsingRouter({ prisma, parsingQueue, config: { ...config, frontendUrl, nodeEnv } }));
+  app.use('/api', createCodeExplorerRouter({ prisma, config: { ...config, frontendUrl, nodeEnv } }));
   if (!embeddingService && config.embedding) embeddingService = createOllamaEmbeddingService({ config: config.embedding, fetchImpl });
   if (!llmService && config.llm) llmService = createGeminiLlmService({ config: config.llm });
   if (config.embedding && config.search) {

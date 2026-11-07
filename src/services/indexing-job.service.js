@@ -9,7 +9,7 @@ export async function createIndexingJob({ prisma, indexingQueue, repositoryId, u
     where: { repositoryId, userId },
     include: { repository: true }
   });
-  if (!importedRepository) return { notFound: true };
+  if (!importedRepository || importedRepository.repository?.deletionRequestedAt) return { notFound: true };
 
   const existing = await prisma.indexingJob.findFirst({
     where: { repositoryId, status: { in: ACTIVE_STATUSES } },

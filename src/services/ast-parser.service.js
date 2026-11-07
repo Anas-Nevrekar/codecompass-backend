@@ -42,6 +42,24 @@ function importMetadata(node, source) {
   return {};
 }
 
+function commonJsRequireMetadata(node, source) {
+  const modules = [];
+  const pending = [...(node.namedChildren ?? [])];
+  while (pending.length) {
+    const candidate = pending.shift();
+    if (candidate.type === 'call_expression' && childText(candidate.childForFieldName('function'), source) === 'require') {
+      const args = candidate.childForFieldName('arguments');
+      const argument = args?.namedChildren?.[0];
+      if (argument?.type === 'string') {
+        const moduleName = childText(argument, source).replace(/^['"]|['"]$/g, '');
+        if (moduleName && !modules.includes(moduleName)) modules.push(moduleName);
+      }
+    }
+    pending.unshift(...(candidate.namedChildren ?? []));
+  }
+  return modules.length ? { moduleNames: modules, importKind: 'commonjs-require' } : {};
+}
+
 export function parseSource(source, extension) {
   const grammar = grammars[extension.toLowerCase()];
   if (!grammar) return { supported: false, chunks: [], hasErrors: false };
@@ -76,7 +94,8 @@ export function parseSource(source, extension) {
           startLine: node.startPosition.row + 1,
           endLine: node.endPosition.row + 1,
           source: sourceCode,
-          metadata: type === 'import' ? importMetadata(node, source) : {}
+          metadata: type === 'import' ? importMetadata(node, source)
+            : type === 'variable' && (grammarName === 'javascript' || grammarName === 'typescript') ? commonJsRequireMetadata(node, source) : {}
         });
       }
     }

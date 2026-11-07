@@ -10,7 +10,7 @@ CodeCompass is an AI-powered codebase onboarding assistant. This repository cont
 - GitHub REST API for profile identity and public repository metadata. OAuth access tokens are discarded after profile lookup.
 - Redis and BullMQ remain from the Phase 1 foundation; Phase 2 does not use queues.
 
-Repository import stores metadata only. This MVP does not clone or index source code and does not support private repositories.
+Repository import stores public repository metadata and immediately queues indexing. BullMQ workers then advance the repository through indexing, AST parsing, and embedding generation. Private repositories are not supported.
 
 ## Phase 5: embeddings and hybrid search
 
@@ -125,14 +125,15 @@ Indexing runs in a separate BullMQ worker. The API stores an `IndexingJob` in Po
 
 ### Start infrastructure, API, and worker
 
-Run these commands in separate terminals:
+Start the local stack with:
 
 ```bash
 docker compose up -d
 npm run db:deploy
 npm run dev
-npm run worker
 ```
+
+`npm run dev` starts the API and all three BullMQ workers (indexing, parsing, and embeddings) together. Stop them with Ctrl+C. For isolated debugging, `npm run dev:api`, `npm run worker`, `npm run parse-worker`, and `npm run embedding-worker` are still available as separate commands. Importing a repository starts the full pipeline; the dashboard shows stage progress and offers a retry when a stage fails.
 
 For local schema development, `npm run db:migrate` creates/applies a migration. `npm run db:deploy` applies checked-in migrations without resetting data. Set the environment values in `.env`; `.env.example` shows the defaults. Git must be installed and available on `PATH` for the worker. The API and worker can be stopped independently. The worker closes BullMQ, Redis, and Prisma connections on `SIGINT` or `SIGTERM`.
 
@@ -209,4 +210,27 @@ Answer requests send the user's question and retrieved repository source code to
 
 ## Phase scope
 
-Phase 1 health/readiness and infrastructure behavior remains available. Phase 2 adds GitHub OAuth, persistent users, cookie sessions, URL validation, public repository metadata import, and user-scoped listing. Phase 3 adds background shallow cloning and persistent file inventory. Phase 4 adds AST parsing and code chunk persistence. Phase 5 adds local embeddings and hybrid retrieval. Phase 6 adds stateless Gemini-backed, evidence-grounded question answering. Frontend implementation remains future work.
+Phase 1 health/readiness and infrastructure behavior remains available. Phase 2 adds GitHub OAuth, persistent users, cookie sessions, URL validation, public repository metadata import, and user-scoped listing. Phase 3 adds background shallow cloning and persistent file inventory. Phase 4 adds AST parsing and code chunk persistence. Phase 5 adds local embeddings and hybrid retrieval. Phase 6 adds stateless Gemini-backed, evidence-grounded question answering. Phase 7 adds authenticated repository graph, parsed-source, and structured static-analysis guide APIs; the frontend explorer is maintained in the separate frontend repository.
+# Phase 7 code graph and source navigation APIs
+
+All endpoints below require the existing authenticated session cookie and verify that the repository is imported by the signed-in user. They use the latest completed indexing job and its latest parsing job. Responses report `not_indexed`, `indexing`, `not_parsed`, `parsing`, `failed`, or `stale` until matching analysis is available.
+
+## `GET /api/repositories/:repositoryId/graph`
+
+Returns graph data derived from current `RepositoryFile` and `CodeChunk` records. Supported nodes are `file`, `function`, `class`, `variable`, and `import` (the types emitted by the current AST parser). Supported edges are `CONTAINS` and `IMPORTS`. `CONTAINS` uses AST line ranges; `IMPORTS` is returned only when a module path resolves unambiguously to an indexed file. The current parser does not provide call, export, inheritance, or implementation relationships, so these are listed as unsupported in metadata and are not fabricated.
+
+Edge confidence is represented by `certainty`, `isInferred`, and source `evidence`. Direct parser-backed relationships use `certainty: "high"` and `isInferred: false`; the API does not invent numeric confidence scores. Graph generation is bounded to 1,000 files and 5,000 chunks. If either bound is exceeded, `metadata.truncated` is true and `metadata.isComplete` is false. `metadata.modules` groups files by their indexed directory paths (at a depth that keeps the summary readable) and reports resolved direct import dependencies between groups; it does not assign semantic roles to folders.
+
+## `GET /api/repositories/:repositoryId/source?filePath=src%2Fapp.js&startLine=1&endLine=40&symbolName=boot`
+
+`filePath` is required and must be a repository-relative path from the current indexed inventory. Optional line bounds select overlapping chunks; `symbolName` selects an exact symbol; `chunkId` selects one database-resolved chunk and is suitable for Phase 6 citations. The response includes trusted chunk IDs, source, language, and line ranges from the database. It has `contentScope: "parsed_chunks"` and `metadata.isCompleteFile: false`: Phase 4 persists AST chunks rather than full file contents, so lines outside parsed chunks cannot be served. Traversal and absolute paths are rejected. Phase 6 citations already carry chunk IDs and backend-resolved path/line metadata, and can be opened with their `filePath` and `chunkId`.
+
+## `GET /api/repositories/:repositoryId/reading-guide`
+
+Returns a deterministic `static-analysis` guide with a backward-compatible flat `recommendations` list and seven ordered `stages`: repository layout, initialization, application flow, shared code structures, data/persistence clues, dependencies, and next exploration. Stage items carry explanations, evidence certainty, source availability, graph links, prerequisites, and expected outcomes. Filename and directory clues are labeled as heuristics; direct resolved imports are parser-backed, but do not prove runtime execution order. The response includes analysis coverage and the indexing/parsing job IDs so clients can persist manual progress against a specific parse snapshot.
+
+## Reading guide progress
+
+`GET /api/repositories/:repositoryId/reading-progress` returns the signed-in user's saved stage statuses and active stage for the current parsing job. `PUT` on the same path stores `{ "parsingJobId": "...", "activeStageId": "initialization", "statusByStage": { "repository-map": "completed" } }`. Updates require the configured frontend `Origin`, repository ownership, the current completed parse snapshot, and supported stage/status values. Progress is stored per user and repository and is treated as empty after a new parse. The additive `ReadingProgress` table is created by the Phase 7 reading-progress migration.
+
+The graph and reading-guide APIs add no new environment variables. Run `npm run db:validate`, `npm run db:generate`, and backend tests with `npm test`; focused coverage is in `tests/code-explorer.test.js`.

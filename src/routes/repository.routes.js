@@ -19,7 +19,8 @@ export function createRepositoryRouter(dependencies) {
     }
   });
   router.post('/:repositoryId/index', originCheck, auth, importLimit, controller.startIndexing);
-  router.get('/:repositoryId/indexing-status', auth, controller.indexingStatus);
+  router.delete('/:repositoryId', originCheck, auth, controller.remove);
+  router.get('/:repositoryId/indexing-status', auth, controller.processingStatus);
   router.post('/import', originCheck, auth, importLimit, controller.import);
   router.get('/', auth, controller.list);
   return router;

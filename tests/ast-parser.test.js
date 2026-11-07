@@ -30,6 +30,13 @@ test('extracts TypeScript and Python structures and recovers malformed input', (
   assert.equal(parseSource('', '.py').chunks.length, 0);
 });
 
+test('extracts literal CommonJS require dependencies from parsed JavaScript declarations', () => {
+  const result = parseSource("const User = require('../models/User');\nconst { createOrder } = require('../services/orders');", '.js');
+  const variables = result.chunks.filter((chunk) => chunk.structureType === 'variable');
+  assert.deepEqual(variables.map((chunk) => chunk.metadata.moduleNames), [['../models/User'], ['../services/orders']]);
+  assert.ok(variables.every((chunk) => chunk.metadata.importKind === 'commonjs-require'));
+});
+
 test('unsupported extensions are skipped', () => {
   assert.equal(languageForExtension('.md'), null);
   assert.deepEqual(parseSource('# heading', '.md'), { supported: false, chunks: [], hasErrors: false });

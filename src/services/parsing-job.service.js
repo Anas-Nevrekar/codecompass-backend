@@ -8,11 +8,30 @@ import { resolveRepositoryStorageRoot } from './retained-repository-storage.serv
 const ACTIVE = ['queued', 'processing'];
 const within = (base, file) => { const rel = path.relative(base, file); return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel)); };
 
-export async function createParsingJob({ prisma, queue, repositoryId, userId, indexingConfig }) {
+export async function createParsingJob(options) {
+  const { prisma, queue, repositoryId, userId, indexingJobId: requestedIndexingJobId, automatic = false } = options;
+  if (queue && prisma.$transaction && !options.inTransaction) {
+    const result = await prisma.$transaction(async (tx) => {
+      await tx.$queryRawUnsafe('SELECT 1 FROM pg_advisory_xact_lock(hashtext($1))', 'codecompass:parse:' + repositoryId);
+      return createParsingJob({ ...options, prisma: tx, queue: null, inTransaction: true });
+    });
+    if (result.job && !result.alreadyRunning && !result.alreadyProcessed) {
+      try { await queue.add('parse-repository', { parsingJobId: result.job.id }, { jobId: result.job.bullmqJobId, attempts: 3, backoff: { type: 'exponential', delay: 1000 }, removeOnComplete: 100, removeOnFail: 500 }); }
+      catch (error) { console.error('Parsing job saved for queue recovery', { jobId: result.job.id, code: error?.code ?? 'QUEUE_UNAVAILABLE' }); }
+    }
+    return result;
+  }
+  const { indexingConfig } = options;
   const imported = await prisma.repositoryImport.findFirst({ where: { repositoryId, userId }, include: { repository: true } });
-  if (!imported) return { notFound: true };
-  const indexingJob = await prisma.indexingJob.findFirst({ where: { repositoryId, status: 'completed' }, orderBy: { completedAt: 'desc' } });
+  if (!imported || imported.repository?.deletionRequestedAt) return { notFound: true };
+  const indexingJob = requestedIndexingJobId
+    ? await prisma.indexingJob.findFirst({ where: { id: requestedIndexingJobId, repositoryId, status: 'completed' } })
+    : await prisma.indexingJob.findFirst({ where: { repositoryId, status: 'completed' }, orderBy: { completedAt: 'desc' } });
   if (!indexingJob || !imported.repository.retainedStoragePath) return { unavailable: true };
+  if (automatic) {
+    const existingForSnapshot = await prisma.parsingJob.findFirst({ where: { repositoryId, indexingJobId: indexingJob.id } });
+    if (existingForSnapshot) return { job: existingForSnapshot, alreadyRunning: ACTIVE.includes(existingForSnapshot.status), alreadyProcessed: true };
+  }
   const root = resolveRepositoryStorageRoot(indexingConfig.repositoryStorageDir);
   const parts = imported.repository.retainedStoragePath.split(/[\\/]/);
   if (parts.length !== 3 || parts[0] !== 'repositories' || parts[1] !== repositoryId || parts[2] !== indexingJob.id) return { unavailable: true };
@@ -92,7 +111,7 @@ export async function recoverQueuedParsingJobs({ prisma, queue, now = Date.now()
 export function createParsingProcessor({ prisma, indexingConfig, maxFileSizeBytes = 2 * 1024 * 1024, maxFiles = 10000 }) {
   return async ({ data }) => {
     const job = await prisma.parsingJob.findUnique({ where: { id: data?.parsingJobId }, include: { repository: true } });
-    if (!job || ['completed', 'completed_with_errors'].includes(job.status)) return;
+    if (!job || job.repository?.deletionRequestedAt || ['completed', 'completed_with_errors'].includes(job.status)) return;
     const root = await realpath(resolveRepositoryStorageRoot(indexingConfig.repositoryStorageDir));
     const stored = job.repository.retainedStoragePath;
     const parts = typeof stored === 'string' ? stored.split(/[\\/]/) : [];
@@ -110,6 +129,8 @@ export function createParsingProcessor({ prisma, indexingConfig, maxFileSizeByte
     await prisma.parsingFileResult.deleteMany({ where: { parsingJobId: job.id } });
     let parsedFiles = 0, skippedFiles = files.length - selected.length, failedFiles = 0, totalChunks = 0, processedFiles = 0;
     for (const file of selected) {
+      const currentRepository = prisma.repository?.findUnique ? await prisma.repository.findUnique({ where: { id: job.repositoryId }, select: { deletionRequestedAt: true } }) : null;
+      if (prisma.repository?.findUnique && (!currentRepository || currentRepository.deletionRequestedAt)) return;
       let status = 'parsed', errorMessage = null, chunks = [];
       try {
         const language = languageForExtension(file.extension);

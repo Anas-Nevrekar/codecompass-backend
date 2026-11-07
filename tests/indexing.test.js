@@ -98,6 +98,9 @@ test('repository indexing request is authenticated, ownership checked, and queue
   const repositoryStatus = await request(app).get(`/api/repositories/${repositoryId}/indexing-status`).set('Cookie', await cookie());
   assert.equal(repositoryStatus.status, 200);
   assert.equal(repositoryStatus.body.latestJob.id, response.body.job.id);
+  assert.equal(repositoryStatus.body.currentStage, 'indexing');
+  assert.equal(repositoryStatus.body.status, 'processing');
+  assert.equal(Object.hasOwn(repositoryStatus.body.latestJob, 'bullmqJobId'), false);
   assert.equal(Object.hasOwn(repositoryStatus.body, 'retainedStoragePath'), false);
   const repositoryList = await request(app).get('/api/repositories').set('Cookie', await cookie());
   assert.equal(repositoryList.status, 200);

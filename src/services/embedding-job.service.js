@@ -12,11 +12,30 @@ export function embeddingJobResponse(job) {
     errorMessage: job.errorMessage, startedAt: job.startedAt, completedAt: job.completedAt };
 }
 
-export async function createEmbeddingJob({ prisma, queue, repositoryId, userId, config }) {
+export async function createEmbeddingJob(options) {
+  const { prisma, queue, repositoryId, userId, parsingJobId: requestedParsingJobId, automatic = false } = options;
+  if (queue && prisma.$transaction && !options.inTransaction) {
+    const result = await prisma.$transaction(async (tx) => {
+      await tx.$queryRawUnsafe('SELECT 1 FROM pg_advisory_xact_lock(hashtext($1))', 'codecompass:embed:' + repositoryId);
+      return createEmbeddingJob({ ...options, prisma: tx, queue: null, inTransaction: true });
+    });
+    if (result.job && !result.alreadyRunning && !result.alreadyProcessed) {
+      try { await queue.add('embed-repository', { embeddingJobId: result.job.id }, { jobId: result.job.bullmqJobId, attempts: 3, backoff: { type: 'exponential', delay: 2000 }, removeOnComplete: 100, removeOnFail: 500 }); }
+      catch (error) { console.error('Embedding job saved for queue recovery', { jobId: result.job.id, code: error?.code ?? 'QUEUE_UNAVAILABLE' }); }
+    }
+    return result;
+  }
+  const { config } = options;
   const imported = await prisma.repositoryImport.findFirst({ where: { repositoryId, userId } });
-  if (!imported) return { notFound: true };
-  const parsingJob = await prisma.parsingJob.findFirst({ where: { repositoryId, status: { in: SUCCESSFUL_PARSE } }, orderBy: [{ completedAt: 'desc' }, { createdAt: 'desc' }] });
+  if (!imported || imported.repository?.deletionRequestedAt) return { notFound: true };
+  const parsingJob = requestedParsingJobId
+    ? await prisma.parsingJob.findFirst({ where: { id: requestedParsingJobId, repositoryId, status: { in: SUCCESSFUL_PARSE }, failedFiles: 0 } })
+    : await prisma.parsingJob.findFirst({ where: { repositoryId, status: { in: SUCCESSFUL_PARSE } }, orderBy: [{ completedAt: 'desc' }, { createdAt: 'desc' }] });
   if (!parsingJob) return { parsingUnavailable: true };
+  if (automatic) {
+    const existingForParse = await prisma.embeddingJob.findFirst({ where: { repositoryId, parsingJobId: parsingJob.id } });
+    if (existingForParse) return { job: existingForParse, alreadyRunning: ACTIVE.includes(existingForParse.status), alreadyProcessed: true };
+  }
   const active = await prisma.embeddingJob.findFirst({ where: { repositoryId, status: { in: ACTIVE } }, orderBy: { createdAt: 'desc' } });
   if (active) return { job: active, alreadyRunning: true };
   const id = randomUUID();
@@ -62,12 +81,16 @@ export function createEmbeddingProcessor({ prisma, embeddingService, config }) {
   return async ({ data }) => {
     const job = await prisma.embeddingJob.findUnique({ where: { id: data?.embeddingJobId } });
     if (!job || ['completed', 'completed_with_errors'].includes(job.status)) return;
+    const repository = prisma.repository?.findUnique ? await prisma.repository.findUnique({ where: { id: job.repositoryId }, select: { deletionRequestedAt: true } }) : null;
+    if (prisma.repository?.findUnique && (!repository || repository.deletionRequestedAt)) return;
     await prisma.embeddingJob.update({ where: { id: job.id }, data: { status: 'processing', stage: 'loading_chunks', startedAt: job.startedAt ?? new Date(), errorMessage: null } });
     const totalChunks = await prisma.codeChunk.count({ where: { parsingJobId: job.parsingJobId } });
     await prisma.embeddingJob.update({ where: { id: job.id }, data: { totalChunks } });
     let cursor;
     let processedChunks = 0, embeddedChunks = 0, skippedChunks = 0, failedChunks = 0;
     while (true) {
+      const currentRepository = prisma.repository?.findUnique ? await prisma.repository.findUnique({ where: { id: job.repositoryId }, select: { deletionRequestedAt: true } }) : null;
+      if (prisma.repository?.findUnique && (!currentRepository || currentRepository.deletionRequestedAt)) return;
       const chunks = await prisma.codeChunk.findMany({ where: { parsingJobId: job.parsingJobId, ...(cursor ? { id: { gt: cursor } } : {}) }, orderBy: { id: 'asc' }, take: config.embedding.batchSize, include: { embeddings: { where: { embeddingModel: config.embedding.model, embeddingDimensions: config.embedding.dimensions }, select: { id: true } } } });
       if (!chunks.length) break;
       cursor = chunks.at(-1).id;

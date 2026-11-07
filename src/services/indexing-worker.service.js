@@ -25,6 +25,12 @@ export function createIndexingProcessor({
   logger = console
 }) {
   async function updateProgress(indexingJobId, data) {
+    if (prisma.repository?.findUnique) {
+      const job = await prisma.indexingJob.findUnique({ where: { id: indexingJobId }, select: { repositoryId: true } });
+      if (!job) throw new IndexingError('INDEXING_JOB_NOT_FOUND', 'Indexing job no longer exists.');
+      const repository = await prisma.repository.findUnique({ where: { id: job.repositoryId }, select: { deletionRequestedAt: true } });
+      if (!repository || repository.deletionRequestedAt) throw new IndexingError('REPOSITORY_DELETING', 'Repository deletion was requested.');
+    }
     const current = await prisma.indexingJob.findUnique({ where: { id: indexingJobId }, select: { progress: true } });
     if (!current) throw new IndexingError('INDEXING_JOB_NOT_FOUND', 'Indexing job no longer exists.');
     await prisma.indexingJob.update({
@@ -37,7 +43,7 @@ export function createIndexingProcessor({
     const indexingJobId = queueJob.data?.indexingJobId;
     if (typeof indexingJobId !== 'string') throw new UnrecoverableError('Invalid indexing job payload');
     const job = await prisma.indexingJob.findUnique({ where: { id: indexingJobId }, include: { repository: true } });
-    if (!job || ['completed', 'failed'].includes(job.status)) return;
+    if (!job || job.repository?.deletionRequestedAt || ['completed', 'failed'].includes(job.status)) return;
     const attemptCount = Math.max(job.attemptCount, queueJob.attemptsMade) + 1;
     await updateProgress(indexingJobId, {
       status: 'cloning', stage: 'cloning', message: 'Cloning the public repository', progress: 10,
