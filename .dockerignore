@@ -10,6 +10,9 @@ node_modules
 
 # Local data, generated artifacts, and tests
 codecompass-repository-storage
+**/codecompass-repository-storage
+repository-storage
+**/repository-storage
 repositories
 coverage
 tests
