@@ -1,131 +1,333 @@
-# CodeCompass Backend
+# CodeCompass
 
-CodeCompass is an AI-powered codebase onboarding assistant. This repository contains the Node.js backend. The React/Vite frontend is maintained separately and communicates with this service through REST APIs.
+**Understand any codebase. Find your way through unfamiliar repositories.**
 
-## Architecture
+CodeCompass is a codebase onboarding platform. A developer can import a public GitHub repository, let background workers index and analyze it, then explore its files, parsed code, relationships, and a guided reading path. Natural-language search and repository Q&A help locate relevant code, and Q&A answers include validated references to the retrieved source chunks.
 
-- Express 5 with JavaScript ES modules.
-- PostgreSQL with Prisma models for users, shared public repository metadata, and user/repository imports.
-- GitHub OAuth App web flow, with a signed, HTTP-only CodeCompass session cookie.
-- GitHub REST API for profile identity and public repository metadata. OAuth access tokens are discarded after profile lookup.
-- Redis and BullMQ remain from the Phase 1 foundation; Phase 2 does not use queues.
+When a developer joins an unfamiliar project, questions such as “Where does the application start?”, “How is authentication handled?”, and “Which files work together?” can take hours to answer. CodeCompass reduces that initial search by organizing source code and providing several ways to navigate it.
 
-Repository import stores public repository metadata and immediately queues indexing. BullMQ workers then advance the repository through indexing, AST parsing, and embedding generation. Private repositories are not supported.
+The application does not send an entire repository to an LLM and ask for a summary. It first builds a file inventory, extracts selected code structures into chunks, creates local embeddings, and retrieves relevant chunks. Only the question and selected evidence are sent to the configured Gemini API for an answer.
 
-## Phase 5: embeddings and hybrid search
+## Contents
 
-Phase 5 embeds Phase 4 `CodeChunk` records with the local Ollama model `qwen3-embedding:0.6b` (1024 dimensions). Code documents include language, structure, symbol, relative path, and source. Search queries use the instruction prefix `Instruct: Given a question, retrieve relevant code snippets` followed by `Query: ...`. Ollama is called by the backend at `${EMBEDDING_BASE_URL}/api/embed`; the frontend never calls Ollama directly.
+- [Screenshots and product walkthrough](#screenshots-and-product-walkthrough)
+- [Features and current scope](#features-and-current-scope)
+- [System architecture](#system-architecture)
+- [Repository processing lifecycle](#repository-processing-lifecycle)
+- [Authentication and request security](#authentication-and-request-security)
+- [Search and question answering](#search-and-question-answering)
+- [Code graph and onboarding guide](#code-graph-and-onboarding-guide)
+- [Data model](#data-model)
+- [Technology stack](#technology-stack)
+- [Local development setup](#local-development-setup)
+- [Configuration reference](#configuration-reference)
+- [API reference](#api-reference)
+- [End-to-end API examples](#end-to-end-api-examples)
+- [Testing and troubleshooting](#testing-and-troubleshooting)
+- [Security and privacy](#security-and-privacy)
+- [Deployment considerations](#deployment-considerations)
+- [Limitations and future improvements](#limitations-and-future-improvements)
+- [Contributing](#contributing)
 
-PostgreSQL runs the pgvector-compatible `pgvector/pgvector:pg17` image. The migration enables the `vector` extension and creates a `vector(1024)` column. Prisma cannot expose this PostgreSQL type as a normal scalar, so a Prisma `Unsupported` field documents the schema and parameterized Prisma raw SQL handles inserts and cosine search. Search uses exact cosine distance (`<=>`) without an approximate index while repositories are small.
+## Screenshots and product walkthrough
 
-Start the API and the embedding worker in separate terminals (`npm run dev` and `npm run embedding-worker`). After parsing, request `POST /api/repositories/:repositoryId/embeddings`, then poll `GET /api/embedding-jobs/:jobId`. The worker persists progress in PostgreSQL, batches up to 16 chunks by default, uses concurrency 1, and marks inputs over `EMBEDDING_MAX_INPUT_CHARS` as failed instead of silently truncating them. Redis/BullMQ carries only the embedding job ID. To check provider/model availability, use authenticated `GET /api/embeddings/health`; the check does not download the model. Install the model yourself with `ollama pull qwen3-embedding:0.6b` if it is missing.
+### 1. Landing page and GitHub sign-in
 
-`POST /api/repositories/:repositoryId/search` accepts `{ "query": "Where is user authentication handled?", "limit": 10 }`. Vector search uses cosine distance, while keyword search combines PostgreSQL `websearch_to_tsquery('simple', ...)` with parameterized substring matching for identifiers and file paths. Results are merged by Reciprocal Rank Fusion: `score = Σ 1 / (60 + rank)`. The response contains code metadata, `vectorRank`, `keywordRank`, `rrfScore`, and `matchedBy`; it does not generate an LLM answer.
+![CodeCompass landing page](docs/images/01-landing-page.png)
 
-Search is limited to the repository's latest successful parsing job. Embeddings belong to their source chunks and cascade away if those chunks are deleted during a later successful parse. Before calling Ollama, the worker copies an existing vector for an unchanged source hash, path, language, structure, symbol, and model configuration; changed or new chunks are embedded. If a newer parsing job has only partial success, it is treated as the latest completed parse, and search remains scoped to that parsing job.
+The landing page introduces the product and offers **Continue with GitHub**. GitHub OAuth establishes a CodeCompass session and returns the user to their workspace. The current import flow supports public GitHub repositories.
 
-Apply schema changes with `npm run db:generate` and `npm run db:deploy`; these commands preserve existing records. For local Docker, PostgreSQL may need recreation with the new pgvector image while retaining the named `postgres_data` volume; do not use `docker compose down -v`. The embedding variables and deployment-friendly base URL are listed in `.env.example`; production can set `EMBEDDING_BASE_URL=http://ollama:11434` on a private Docker network and persist Ollama model files in a volume.
+### 2. Dashboard
 
-Normal unit tests mock Ollama: `npm test`. The separate live check `npm run test:ollama` requires the configured model and running Ollama. No LLM is needed for vector search, keyword search, RRF, or the search endpoint.
+![CodeCompass dashboard](docs/images/02-dashboard.png)
 
-## Prerequisites
+The dashboard is the signed-in user's workspace. It provides a public GitHub repository URL form, a library of imported repositories, and summary counts for total repositories, ready repositories, repositories processing, and repositories needing attention. A repository card links to the repository's analysis tools.
 
-- Node.js 20 or newer and npm
-- Docker with the Docker Compose plugin
-- A GitHub OAuth App for end-to-end sign-in
+### 3. Repository processing
 
-## Install and configure
+![Repository processing stages](docs/images/03-repository-processing.png)
+
+After import, the backend runs indexing, parsing, and embedding generation as background work. The repository card shows the current stage and backend-reported progress. Once processing is ready, the user can ask questions, search code, or open the explorer. A failed stage is reported as needing attention and can be retried where the API exposes a retry action.
+
+### 4. Ask CodeCompass
+
+![Codebase question and source citations](docs/images/04-codebase-qa.png)
+
+For a question such as “Where is authentication handled?”, CodeCompass retrieves matching code and asks Gemini to explain that evidence. The answer cites source IDs such as `[S1]`; the Sources list shows the trusted path, line range, and expandable source snippet. The backend validates citation IDs before returning them.
+
+### 5. Repository graph
+
+![Repository module graph](docs/images/05-repository-graph.png)
+
+The explorer visualizes indexed directory modules and parser-supported relationships. The current graph starts with path-based module groups and supports navigating into files and symbols. Direct parser-backed relationships and inferred or uncertain relationships are styled differently; the graph API reports when size limits make a result partial.
+
+### 6. Guided onboarding
+
+![Guided repository onboarding](docs/images/06-onboarding-guide.png)
+
+The onboarding guide presents a staged route through repository structure, initialization, application flow, core functionality, data architecture, dependencies, and further exploration. Recommendations are generated from indexed paths, parsed chunks, and resolved imports. Progress is manually updated by the user and stored against the current parse snapshot.
+
+## Features and current scope
+
+- GitHub OAuth sign-in and user-scoped repository imports.
+- Public repository metadata import and background source indexing.
+- AST-based parsing and code chunk storage for supported languages.
+- Local Ollama embedding generation and PostgreSQL vector storage.
+- Keyword and vector retrieval combined with Reciprocal Rank Fusion (RRF).
+- Gemini-backed, evidence-grounded Q&A with citation validation and optional streaming.
+- Repository module graph, parsed-source viewer API, and structured onboarding guide.
+- Repository deletion with shared repository ownership handling.
+
+Private repositories, full source-file serving, conversation persistence, and runtime execution analysis are not implemented.
+
+## System architecture
+
+The frontend and backend live in separate repositories/directories. The frontend calls the Express API using credentialed HTTP requests. PostgreSQL stores account, repository, job, code chunk, and embedding metadata. Redis and BullMQ coordinate three worker processes. Cloned repository files are retained on disk for subsequent parsing; vector embeddings are generated by a local Ollama service. Gemini is used only for answer generation.
+
+```mermaid
+flowchart LR
+  Browser[React and Vite frontend] -->|HTTP, session cookie| API[Express API]
+  API --> DB[(PostgreSQL with pgvector)]
+  API --> Redis[(Redis and BullMQ)]
+  API --> GH[GitHub REST and OAuth]
+  Redis --> IW[Indexing worker]
+  Redis --> PW[Parsing worker]
+  Redis --> EW[Embedding worker]
+  IW --> Git[Git clone and file inventory]
+  Git --> Storage[(Retained repository storage)]
+  PW --> Storage
+  PW --> DB
+  EW --> DB
+  EW --> Ollama[Ollama embedding API]
+  API --> Ollama
+  API --> Gemini[Google Gemini API]
+  API --> DB
+```
+
+The browser never calls GitHub's provider APIs for repository import, Ollama, or Gemini directly. Provider credentials stay in the backend environment.
+
+## Repository processing lifecycle
+
+Importing a repository creates or reuses shared repository metadata and attaches it to the signed-in user. A new import automatically starts indexing. After successful indexing, the pipeline queues parsing; after a successful parse with no failed files, it automatically queues embedding work. The embeddings endpoint remains available for an explicit retry or to start a job where needed.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Imported
+  Imported --> IndexQueued: import queues indexing
+  IndexQueued --> Indexing
+  Indexing --> Indexed: clone and inventory saved
+  Indexing --> IndexFailed: retries exhausted / failure
+  Indexed --> ParsingQueued: pipeline queues parse
+  ParsingQueued --> Parsing
+  Parsing --> Parsed: completed or completed with errors
+  Parsing --> ParseFailed: unrecoverable failure
+  Parsed --> EmbeddingQueued: user starts embedding
+  EmbeddingQueued --> Embedding
+  Embedding --> Ready: embeddings complete
+  Embedding --> EmbeddingFailed: failure
+  IndexFailed --> IndexQueued: retry indexing
+  ParseFailed --> ParsingQueued: retry parsing
+  EmbeddingFailed --> EmbeddingQueued: retry embeddings
+```
+
+### Indexing
+
+The indexing worker shallow-clones the selected public repository revision, applies file discovery and eligibility rules, and stores a file inventory tied to an indexing job. It retains the successful clone so the parsing worker can read source files. Repository size, file size, clone timeout, worker concurrency, and temporary storage cleanup are configurable. Indexing jobs use BullMQ retries (three attempts with exponential backoff starting at one second).
+
+### Parsing
+
+The parsing worker reads eligible files from retained storage and uses Tree-sitter parsers for JavaScript, TypeScript, and Python. It persists chunks such as functions, classes, variables, and imports with source text, path, language, structure type, line range, metadata, and a source hash. Individual unsupported or unreadable files may be skipped or fail while the job completes with partial results. Parsing progress and per-file outcomes are persisted in PostgreSQL.
+
+### Embeddings
+
+The embedding worker batches parsed chunks and calls the configured Ollama `/api/embed` endpoint. The default model is `qwen3-embedding:0.6b`, configured for 1024 dimensions. Vectors are stored in PostgreSQL's `vector(1024)` column. Unchanged chunks can reuse existing vectors when the source hash and embedding configuration match. A completed embedding job for the current parse is needed for the dashboard to consider the repository ready for search and Q&A.
+
+### Queue and worker flow
+
+```mermaid
+flowchart TD
+  Import[POST repository import] --> IQ[repository-indexing queue]
+  IQ --> IW[ingestion worker]
+  IW -->|success| PCreate[create parsing job]
+  PCreate --> PQ[repository-parsing queue]
+  PQ --> PW[parsing worker]
+  PW -->|completed parse| ECreate[embedding job can be requested]
+  ECreate --> EQ[repository-embeddings queue]
+  EQ --> EW[embedding worker]
+  EW -->|progress and result| PG[(PostgreSQL job tables)]
+  IW --> PG
+  PW --> PG
+  API[API status endpoints] --> PG
+```
+
+The backend `npm run dev` command starts the API plus the indexing, parsing, and embedding workers. The individual commands remain available for isolated development. Redis must be running for BullMQ queues. Startup recovery logic is implemented in the workers for interrupted processing state; specific retry behavior depends on the queue and persisted job state.
+
+## Authentication and request security
+
+1. The browser navigates to `GET /api/auth/github`.
+2. The backend creates and verifies OAuth state, then redirects to GitHub.
+3. The callback exchanges the authorization code, fetches the GitHub profile, and upserts the CodeCompass user.
+4. The backend discards the GitHub access token after profile lookup, signs a session token, sets an HTTP-only session cookie, and redirects to the frontend.
+5. The frontend calls `GET /api/auth/me` on startup. Protected API routes validate the session cookie and resolve the user from PostgreSQL.
+
+```mermaid
+sequenceDiagram
+  participant U as Browser
+  participant A as CodeCompass API
+  participant G as GitHub
+  participant D as PostgreSQL
+  U->>A: GET /api/auth/github
+  A-->>U: Redirect to GitHub with OAuth state
+  U->>G: Authorize
+  G-->>U: Redirect with code and state
+  U->>A: GET /api/auth/github/callback
+  A->>G: Exchange code and fetch profile
+  G-->>A: Profile data
+  A->>D: Upsert user
+  A-->>U: Set HTTP-only session cookie; redirect to frontend
+  U->>A: GET /api/auth/me with cookie
+  A->>D: Validate user exists
+  A-->>U: Current user
+```
+
+State-changing routes also check that the request `Origin` exactly matches `FRONTEND_URL`. Credentialed CORS permits only that configured frontend origin. Authentication and repository ownership are enforced by backend middleware and queries. Auth initiation/callback and repository import endpoints have rate limits. Error responses use a safe `{ "error": { "code", "message" } }` envelope.
+
+## Search and question answering
+
+### Hybrid search
+
+Search creates a query embedding with Ollama, performs vector search using PostgreSQL cosine distance, and performs keyword search using PostgreSQL full-text search plus identifier/path substring matching. The two result lists are merged by RRF:
+
+`score = Σ 1 / (k + rank)`
+
+The default `k` is 60. Search runs against the latest completed parse and returns chunk IDs, source, file metadata, line ranges, and retrieval ranks/scores. Search itself does not call Gemini.
+
+### RAG answer generation
+
+Retrieval-Augmented Generation (RAG) means the answer model receives selected repository evidence alongside the question. CodeCompass limits the evidence to its configured context budget and assigns source IDs. The Gemini system prompt treats retrieved source as untrusted data, asks for evidence-based answers, and requires citation references. The backend validates citations and maps them to trusted database chunk metadata before responding. If retrieval yields no evidence, the API returns a clear insufficient-evidence response without inventing repository details.
+
+```mermaid
+sequenceDiagram
+  participant B as Browser
+  participant A as Express API
+  participant O as Ollama
+  participant P as PostgreSQL
+  participant G as Gemini
+  B->>A: POST /repositories/{id}/ask {question}
+  A->>O: Embed question
+  O-->>A: Query vector
+  A->>P: Vector and keyword retrieval
+  P-->>A: Ranked code chunks
+  A->>A: RRF merge, evidence selection, source IDs
+  A->>G: Question plus selected source evidence
+  G-->>A: Answer and source references
+  A->>A: Validate answer and citations
+  A-->>B: Answer, validated citations, parse snapshot ID
+```
+
+Streaming uses Server-Sent Events over a credentialed `fetch` POST. Events include `start`, `token`, `citations`, `complete`, and `error`. Non-streaming requests return JSON. When no evidence is retrieved, the endpoint returns the insufficient-evidence JSON directly, even if streaming was requested. Conversations are held in frontend page state and are not persisted by the backend.
+
+## Code graph and onboarding guide
+
+The graph and guide are deterministic backend analyses of the current indexed inventory and parsed chunks; they are not generated by Gemini.
+
+- **Graph:** emits file and AST symbol nodes, `CONTAINS` relationships based on parser ranges, and `IMPORTS` relationships when a module path resolves unambiguously. It does not fabricate call, export, inheritance, or implementation edges. Graph output is bounded to 1,000 files and 5,000 chunks and reports truncation.
+- **Modules:** group files from indexed directory paths. Group-to-group edges summarize resolved imports; folder names are not interpreted as semantic roles.
+- **Source viewer API:** returns selected parsed chunks with trusted path and line metadata. It does not return complete source files; unparsed lines are unavailable.
+- **Reading guide:** creates seven ordered stages: repository map, initialization, application flow, core functionality, data architecture, dependencies, and next exploration. Filename and directory hints are labeled as heuristics; parser-backed imports are direct evidence but do not prove runtime order.
+- **Progress:** stored per user and repository for a parsing job snapshot. A newer parse makes the earlier progress snapshot no longer current.
+
+## Data model
+
+The Prisma schema is the source of truth. IDs are UUIDs unless noted. Ownership and deletion behavior are enforced through foreign keys and unique constraints.
+
+| Model | Purpose | Important relationships |
+|---|---|---|
+| `User` | GitHub identity and CodeCompass account | Has repository imports, indexing jobs, and reading progress |
+| `Repository` | Shared public GitHub repository metadata and retained-processing state | Has imports, indexing jobs, files, parses, chunks, embeddings, and progress |
+| `RepositoryImport` | Associates a user with a repository | Unique per `(userId, repositoryId)`; deleting one import can preserve shared repository data |
+| `ReadingProgress` | Per-user guide position and stage status | Unique per `(userId, repositoryId)`; tied to a parse snapshot ID |
+| `IndexingJob` | Clone and inventory job status/progress | Belongs to user and repository; cascades to its inventory files and parses |
+| `RepositoryFile` | File inventory row for an indexing snapshot | Unique per `(repositoryId, indexingJobId, relativePath)` |
+| `ParsingJob` | AST parsing state for an indexing snapshot | Has per-file results and code chunks |
+| `ParsingFileResult` | Parsed/skipped/failed result for a file | Unique per `(parsingJobId, fileId)` |
+| `CodeChunk` | AST-selected source excerpt with path, lines, and source hash | Belongs to repository, file, and parsing job |
+| `EmbeddingJob` | Embedding batch job state and progress | Belongs to repository and parsing job |
+| `CodeEmbedding` | Vector plus model/dimension metadata | Unique per `(codeChunkId, embeddingModel, embeddingDimensions)` |
+
+Enums in the schema include `IndexingStatus`, `ParsingStatus`, and `EmbeddingStatus`; job tables retain progress counts, stage, timestamps, and error information. PostgreSQL's `vector(1024)` field is represented as Prisma `Unsupported` and accessed with parameterized raw SQL. See [`prisma/schema.prisma`](prisma/schema.prisma) and the migration history in [`prisma/migrations/`](prisma/migrations/).
+
+```mermaid
+erDiagram
+  User ||--o{ RepositoryImport : imports
+  Repository ||--o{ RepositoryImport : shared_by
+  User ||--o{ IndexingJob : starts
+  Repository ||--o{ IndexingJob : processes
+  IndexingJob ||--o{ RepositoryFile : inventories
+  Repository ||--o{ RepositoryFile : contains
+  IndexingJob ||--o{ ParsingJob : parsed_as
+  Repository ||--o{ ParsingJob : has
+  ParsingJob ||--o{ ParsingFileResult : records
+  RepositoryFile ||--o{ ParsingFileResult : produces
+  ParsingJob ||--o{ CodeChunk : extracts
+  RepositoryFile ||--o{ CodeChunk : source_for
+  Repository ||--o{ CodeChunk : stores
+  ParsingJob ||--o{ EmbeddingJob : embeds
+  Repository ||--o{ EmbeddingJob : tracks
+  CodeChunk ||--o{ CodeEmbedding : vectorized_as
+  Repository ||--o{ CodeEmbedding : stores
+  User ||--o{ ReadingProgress : tracks
+  Repository ||--o{ ReadingProgress : has
+```
+
+## Technology stack
+
+| Area | Implementation |
+|---|---|
+| Frontend | React, Vite, React Router, Fetch API |
+| Code display and graph | Monaco Editor React integration, React Flow |
+| Backend | Node.js 20+, Express 5, ES modules |
+| Database | PostgreSQL, Prisma 6, pgvector extension |
+| Queues | Redis 7 and BullMQ 5 |
+| Parsing | Tree-sitter JavaScript, TypeScript, and Python grammars |
+| Embeddings | Ollama `/api/embed`, default `qwen3-embedding:0.6b`, 1024 dimensions |
+| Answer generation | Google `@google/genai` SDK, configured Gemini model |
+| Tests | Node test runner and Supertest (backend); Vitest and Testing Library (frontend) |
+
+## Local development setup
+
+### Requirements
+
+- Node.js 20 or newer and npm.
+- Docker with Docker Compose plugin, for PostgreSQL and Redis.
+- Git available on `PATH` for repository cloning.
+- A GitHub OAuth App for sign-in.
+- Ollama installed and running with `qwen3-embedding:0.6b` for embeddings/search.
+- A Gemini API key for repository Q&A.
+
+The two repositories are separate. These instructions assume they are adjacent folders named `codecompass-backend` and `codecompass-frontend`.
+
+### 1. Configure and start the backend
 
 ```bash
+cd codecompass-backend
 npm install
 cp .env.example .env
 ```
 
-Set the local OAuth session secret to a random value of at least 32 bytes. For example:
+Set the required OAuth values in `.env`:
 
-```bash
-openssl rand -base64 32
+```dotenv
+GITHUB_CLIENT_ID=your-oauth-client-id
+GITHUB_CLIENT_SECRET=your-oauth-client-secret
+GITHUB_CALLBACK_URL=http://localhost:3000/api/auth/github/callback
+SESSION_SECRET=replace-with-at-least-32-random-bytes
+LLM_API_KEY=your-gemini-api-key
 ```
 
-Set `SESSION_SECRET` to the generated value. Configure `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, and `GITHUB_CALLBACK_URL` as described below. Basic health checks and the API process can run when OAuth values are missing; OAuth requests then return `OAUTH_CONFIGURATION_ERROR`.
+Generate a local session secret with `openssl rand -base64 32`. Register an OAuth App with homepage `http://localhost:5173` and callback URL `http://localhost:3000/api/auth/github/callback`.
 
-`.env` is ignored by Git. Never commit credentials.
-
-## Register a GitHub OAuth App
-
-1. In GitHub, open **Settings → Developer settings → OAuth Apps → New OAuth App**.
-2. Set the homepage URL to `http://localhost:5173` for local development.
-3. Set the authorization callback URL to `http://localhost:3000/api/auth/github/callback`.
-4. Register the app, then copy its client ID and generate a client secret into `.env`.
-5. Keep `GITHUB_CALLBACK_URL` identical to the registered callback URL.
-
-In production, use HTTPS for the callback and set `FRONTEND_URL` to the exact deployed frontend origin. GitHub sign-in requests only the `read:user` scope. No repository scope is requested; public repository metadata is read from GitHub's public API without retaining the OAuth access token.
-
-## Start local infrastructure and apply migrations
-
-```bash
-docker compose up -d
-docker compose ps
-npm run db:validate
-npm run db:migrate
-```
-
-The PostgreSQL volume persists when services stop. Stop containers without deleting database data with `docker compose down`. To intentionally erase local data, run `docker compose down -v`.
-
-## Start the API
-
-```bash
-npm run dev
-```
-
-Use `npm start` for a non-watch run. The server listens on `PORT` (3000 by default). `FRONTEND_URL` must be the exact frontend origin (default `http://localhost:5173`). CORS allows credentials only from that origin. Browser calls that use the session cookie must include credentials, for example `fetch(url, { credentials: 'include' })`. State-changing browser requests (`POST /api/auth/logout` and `POST /api/repositories/import`) must send that exact `Origin`; CORS alone is not treated as CSRF protection.
-
-## API contract
-
-All API paths are relative to `http://localhost:3000` in local development.
-
-### Health
-
-- `GET /api/health` returns `200` while the process is running; it does not require infrastructure.
-- `GET /api/ready` runs a PostgreSQL query and Redis `PING`; it returns `503` if either dependency is unavailable.
-
-### Authentication
-
-- `GET /api/auth/github` starts OAuth and redirects to GitHub. The backend creates a short-lived, signed state cookie and requests `read:user`.
-- `GET /api/auth/github/callback` validates state, exchanges the authorization code server-to-server, validates the GitHub profile, upserts a user by GitHub numeric ID, sets the application cookie, then redirects to `/dashboard` on the frontend. Failures redirect to `/auth/error?code=...` with a stable error code.
-- `GET /api/auth/me` requires a valid session cookie. It returns `200` with `{ "authenticated": true, "user": { "id", "githubUsername", "displayName", "avatarUrl", "profileUrl" } }`; without a valid session it returns `401` with `UNAUTHENTICATED`.
-- `POST /api/auth/logout` requires the configured frontend `Origin`, clears the session cookie, and returns `{ "success": true }`.
-
-The application cookie is HTTP-only, `SameSite=Lax`, scoped to `/api`, and `Secure` in production. Sessions are signed HS256 JWTs that expire after seven days. Logout clears the browser cookie; because sessions are stateless, a previously copied token remains valid until expiry. Do not store session or GitHub tokens in browser storage.
-
-### Public repository metadata
-
-- `POST /api/repositories/import` requires a valid session and the configured frontend `Origin`. Request JSON: `{ "url": "https://github.com/owner/repository" }`. A new import returns `201` with code `REPOSITORY_IMPORTED`; an existing import by the same user returns `200` with code `REPOSITORY_ALREADY_IMPORTED` and `alreadyImported: true`. The response includes stored metadata: repository ID, owner, name, full name, HTML URL, description, default branch, language, visibility, star/fork counts, GitHub creation date, and metadata update date.
-- `GET /api/repositories` requires a valid session and returns only the current user's imports, newest first, as `{ "repositories": [...] }`.
-
-Repository URLs must be HTTPS URLs on exactly `github.com` with an owner and repository path. Trailing slash and `.git` suffix are accepted. Query strings, fragments, credentials, other hosts, and extra path segments are rejected. GitHub repository metadata is fetched from the fixed `api.github.com/repos/{owner}/{repo}` endpoint. The same GitHub repository is stored once and can be associated with multiple users; each user's association is unique.
-
-### Errors
-
-Errors use `{ "error": { "code": "...", "message": "..." } }`. Relevant codes include `UNAUTHENTICATED`, `INVALID_OAUTH_STATE`, `OAUTH_CONFIGURATION_ERROR`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR`, `INVALID_REPOSITORY_URL`, `REPOSITORY_NOT_FOUND_OR_INACCESSIBLE`, `PRIVATE_REPOSITORY_UNSUPPORTED`, `GITHUB_API_RATE_LIMIT`, `GITHUB_UPSTREAM_UNAVAILABLE`, `GITHUB_UPSTREAM_ERROR`, `ORIGIN_FORBIDDEN`, and `RATE_LIMITED`. Private and inaccessible repositories are not distinguished when GitHub does not expose their metadata.
-
-Both `/api/auth/github` and its callback have rate limits; imports are limited to 30 attempts per IP per 15 minutes. Requests to GitHub have an 8-second timeout. Neither OAuth credentials, access tokens, nor session tokens are returned in JSON or logged.
-
-## Tests
-
-```bash
-npm test
-```
-
-The automated tests mock GitHub responses and Prisma access, so they do not need live OAuth credentials or GitHub network access. For manual infrastructure checks, start Compose, apply migrations, run the API, and request `/api/ready`. A full OAuth login requires a correctly configured GitHub OAuth App and matching callback URL.
-
-## Phase 3: background repository indexing
-
-Indexing runs in a separate BullMQ worker. The API stores an `IndexingJob` in PostgreSQL and publishes only its ID to Redis. If Redis is unavailable during publication, the API still returns the persisted queued job; the worker's startup and periodic recovery checks publish any queued database job missing from Redis. BullMQ uses a stable ID (`index-{database job ID}`), so repeated reconciliation does not add duplicate waiting jobs. Jobs stuck in a processing state are reconciled only after five minutes and only when the matching BullMQ job is absent or terminal. PostgreSQL is the source of truth for status and progress.
-
-### Start infrastructure, API, and worker
-
-Start the local stack with:
+Start PostgreSQL and Redis, apply migrations, and run the API plus workers:
 
 ```bash
 docker compose up -d
@@ -133,104 +335,293 @@ npm run db:deploy
 npm run dev
 ```
 
-`npm run dev` starts the API and all three BullMQ workers (indexing, parsing, and embeddings) together. Stop them with Ctrl+C. For isolated debugging, `npm run dev:api`, `npm run worker`, `npm run parse-worker`, and `npm run embedding-worker` are still available as separate commands. Importing a repository starts the full pipeline; the dashboard shows stage progress and offers a retry when a stage fails.
+`npm run dev` starts the API and all three workers. Use Ctrl+C to stop them. For isolated debugging, use `npm run dev:api`, `npm run worker`, `npm run parse-worker`, or `npm run embedding-worker` in separate terminals. Do not start duplicate worker processes unless you intend to run additional concurrency.
 
-For local schema development, `npm run db:migrate` creates/applies a migration. `npm run db:deploy` applies checked-in migrations without resetting data. Set the environment values in `.env`; `.env.example` shows the defaults. Git must be installed and available on `PATH` for the worker. The API and worker can be stopped independently. The worker closes BullMQ, Redis, and Prisma connections on `SIGINT` or `SIGTERM`.
+### 2. Configure and start the frontend
 
-### Indexing configuration
+In a second terminal:
 
-| Variable | Default | Purpose |
-|---|---:|---|
-| `INDEXING_CLONE_TIMEOUT_MS` | `120000` | Maximum duration of one shallow Git clone; the worker terminates the clone process group on timeout. |
-| `INDEXING_MAX_REPOSITORY_SIZE_MB` | `500` | Maximum checkout size, including `.git`, checked during cloning every 1.5 seconds and again after clone completion. |
-| `INDEXING_MAX_FILE_SIZE_MB` | `2` | Larger supported files are excluded before any file content is read. |
-| `INDEXING_WORKER_CONCURRENCY` | `2` | Maximum simultaneous repository jobs in this worker process. Lower it on machines with limited disk or memory. |
-| `INDEXING_TEMP_DIR` | system temp `/codecompass-indexing` | Dedicated parent directory for unique temporary clones. Must be outside the application directory; leave blank for the system temporary directory. |
-| `INDEXING_REPOSITORY_STORAGE_DIR` | `../codecompass-repository-storage` beside the backend directory | Persistent root for completed clones. Must be a dedicated directory outside the application directory and separate from `INDEXING_TEMP_DIR`. |
-| `INDEXING_STALE_TEMP_DIR_AGE_HOURS` | `24` | Age before an abandoned, CodeCompass-named temporary directory is removed. |
-| `INDEXING_RECOVERY_INTERVAL_MS` | `30000` | Periodic database-to-Redis reconciliation interval. |
-
-Checkout size is checked during cloning on a best-effort polling basis; a fast size spike between checks can briefly exceed the configured limit. A post-clone check always runs before file discovery. The worker counts regular-file bytes without following symlinks. The checkout limit is not a hard operating-system disk quota.
-
-### Inventory and lifecycle
-
-`RepositoryFile` stores only the repository ID, relative `/`-separated path, lowercase extension, category, size in bytes, and indexing job ID. It never stores code contents or temporary paths. A unique constraint prevents duplicate paths per repository. Supported extensions are `.js`, `.jsx`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.mts`, `.cts`, `.py`, `.json`, `.html`, `.css`, `.md`, `.yml`, and `.yaml`.
-
-The worker excludes `.git`, dependencies, virtual environments, generated/build/cache output, common dependency lockfiles, minified/bundled/generated files, symlinks, unsupported file types, and supported files over the per-file limit. It does not execute code or install dependencies. Categories are `source`, `configuration`, `documentation`, `markup`, and `style`.
-
-The job status is one of `queued`, `cloning`, `filtering`, `saving_inventory`, `completed`, or `failed`. Progress advances through 0% queued, 10% cloning, 70% filtering, 90% inventory persistence, and 100% completed. Clone progress is not estimated. On retries, the displayed percentage never decreases; the status and stage show the current attempt. BullMQ makes at most three attempts with exponential backoff starting at one second. Timeouts and temporary Git/filesystem errors can retry. Invalid repository metadata, checkout size-limit failures, a missing Git executable, and clear GitHub “repository not found” errors are permanent. Safe error codes/messages are returned; filesystem paths, raw Git output, and stack traces are not.
-
-The old inventory and retained clone stay available while a new clone and scan run. A completed candidate is moved into `<INDEXING_REPOSITORY_STORAGE_DIR>/repositories/<repository UUID>/<indexing job UUID>`. The worker then switches the inventory, commit SHA, timestamp, relative storage reference, and completed job state together in one PostgreSQL transaction. Only after that commit does it remove the superseded clone. If cloning, filtering, filesystem preparation, or the transaction fails, the previous successful clone and inventory remain current. The database stores this generated relative reference only; API responses do not expose it or an absolute server path.
-
-Temporary clones remain under `INDEXING_TEMP_DIR` and are deleted after each attempt. Periodic stale-temp cleanup is restricted to its `codecompass-index-` children. Retained clones are outside that root and are never removed on normal completion or worker shutdown. At worker startup, old unreferenced version directories left by a crash are removed after checking database references and live-process markers. Current retained clones are not subject to age cleanup. Successful clones contain the actual checkout, including `.git`, and no source contents are stored in PostgreSQL.
-
-Retained clones consume disk space approximately in proportion to repository checkout size. Keep enough space available for the current clone plus a replacement during re-indexing; old versions are removed only after the new inventory and path are committed. CodeCompass does not silently delete current clones to reclaim space. To inspect a missing clone, compare the repository's `retainedStoragePath` and `lastIndexedCommitSha` in PostgreSQL, verify that the referenced directory exists under the configured storage root, and check worker logs for filesystem or cleanup errors. Re-run indexing if the committed directory is genuinely missing.
-
-The checked-in Docker Compose file runs only PostgreSQL and Redis; the documented API and worker commands run on the host, so the default sibling storage directory persists across Compose container recreation. If you later run the worker in a container, mount persistent host storage at the same path in every worker container and set `INDEXING_REPOSITORY_STORAGE_DIR` to that mount, for example:
-
-```yaml
-services:
-  backend-worker:
-    volumes:
-      - ./codecompass-repository-storage:/var/lib/codecompass/repositories
-    environment:
-      INDEXING_REPOSITORY_STORAGE_DIR: /var/lib/codecompass/repositories
+```bash
+cd codecompass-frontend
+npm install
+cp .env.example .env
+npm run dev
 ```
 
-Do not rely on a container's writable layer for retained clones. The API does not need access to clone files; the indexing worker and future parsing worker do.
+The frontend defaults to `http://localhost:5173` and API base `http://localhost:3000`. Backend `FRONTEND_URL` must exactly match the browser origin. Use consistent hostnames (for example, `localhost` for both) so cookies and origin checks match.
 
-### Indexing API
+### 3. Start Ollama
 
-All endpoints require the existing session cookie. Repository endpoints also require an import association for the signed-in user. State-changing indexing requests require the configured frontend `Origin`.
+Install and start Ollama separately, then ensure the model is available:
 
-- `POST /api/repositories/{repositoryId}/index` returns `202` with `{ "success": true, "alreadyRunning": false, "job": { "id", "repositoryId", "status", "progress", "stage", "message", "discoveredFileCount", "eligibleFileCount", "excludedFileCount", "attemptCount", "maxAttempts", "error", "startedAt", "completedAt", "createdAt", "updatedAt" } }`. A repeated request for an active repository job returns `200` with `alreadyRunning: true` and that job. The request never waits for cloning.
-- `GET /api/indexing-jobs/{jobId}` returns `{ "job": { ... } }` using the same safe status fields. Jobs are visible only to a user associated with their repository.
-- `GET /api/repositories/{repositoryId}/indexing-status` returns `{ "repositoryId", "latestJob", "lastSuccessfulIndex" }`; `lastSuccessfulIndex` is `null` before the first successful run.
-- `GET /api/repositories` retains its existing user-scoped list and adds nullable latest status/job ID and last-successful commit/time/file-count metadata.
+```bash
+ollama pull qwen3-embedding:0.6b
+```
 
-Redis failures during recovery are logged and retried on the next interval. For troubleshooting, check `/api/ready`, confirm PostgreSQL migrations are applied, confirm Redis is reachable, and check that `git --version` works in the worker's environment. Repositories over the checkout limit fail with `REPOSITORY_SIZE_LIMIT_EXCEEDED`; individual oversized files are counted as excluded.
+The default backend URL is `http://localhost:11434`. Ollama is required for embedding generation and search; Gemini is required for Q&A.
 
-## Phase 4 AST parsing
+## Configuration reference
 
-The parsing endpoint reuses the retained clone and persisted inventory from Phase 3; it never clones a repository. Start parsing with `POST /api/repositories/{repositoryId}/parse` (session cookie and frontend Origin required), then poll `GET /api/parsing-jobs/{jobId}`. Both endpoints are user scoped. Status includes stage, progress, file counts, chunk count, and safe error text. A repository can have only one active parsing job, enforced by a partial unique index. After a successful parse, re-indexing creates a new source snapshot and enables **Re-parse Repository**. The previous indexed files and chunks remain available while the new parse runs; they are replaced only after every new file result is persisted without read/parse failures. If parsing has file failures, the previous data and retained clone remain available for retry.
+Values below are read by the backend from `codecompass-backend/.env`. The frontend reads only `VITE_API_BASE_URL` from its own `.env`. Never put server secrets in variables prefixed with `VITE_`.
 
-Run the separate worker with `npm run parse-worker` after applying `npm run db:deploy`. Parsing queue payloads contain only the parsing job ID. The worker periodically recovers missing queue entries and requeues stale interrupted jobs using the stable database job ID. It loads the inventory in file order, enforces the existing `INDEXING_MAX_FILE_SIZE_MB` limit, skips after 10,000 files, and processes files sequentially to bound memory. It supports JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`), and Python (`.py`), extracting functions, classes, imports, and variable/assignment declarations. Imports include basic module and imported-name metadata. Line ranges are one-based; source text is the exact syntax-node text. Unsupported formats are skipped.
+| Variable | Default | Purpose |
+|---|---|---|
+| `NODE_ENV` | `development` | Runtime mode: development, test, or production |
+| `PORT` | `3000` | HTTP API port |
+| `FRONTEND_URL` | `http://localhost:5173` | Exact allowed frontend origin |
+| `DATABASE_URL` | local PostgreSQL URL | PostgreSQL connection string |
+| `REDIS_URL` | `redis://localhost:6379` | Redis/BullMQ connection |
+| `GITHUB_CLIENT_ID` | empty | OAuth App client ID |
+| `GITHUB_CLIENT_SECRET` | empty | OAuth App secret |
+| `GITHUB_CALLBACK_URL` | empty | OAuth callback; required for OAuth flow |
+| `SESSION_SECRET` | empty | Session signing secret; at least 32 bytes when configured |
+| `INDEXING_CLONE_TIMEOUT_MS` | `120000` | Clone timeout |
+| `INDEXING_MAX_REPOSITORY_SIZE_MB` | `500` | Repository size ceiling |
+| `INDEXING_MAX_FILE_SIZE_MB` | `2` | Eligible source file size ceiling |
+| `INDEXING_WORKER_CONCURRENCY` | `2` | Index worker concurrency |
+| `INDEXING_TEMP_DIR` | system temp | Temporary clone directory override |
+| `INDEXING_REPOSITORY_STORAGE_DIR` | `../codecompass-repository-storage` | Retained successful clone directory |
+| `INDEXING_STALE_TEMP_DIR_AGE_HOURS` | `24` | Age threshold for stale temp cleanup |
+| `INDEXING_RECOVERY_INTERVAL_MS` | `30000` | Index recovery scan interval |
+| `EMBEDDING_PROVIDER` | `ollama` | Only `ollama` is currently accepted |
+| `EMBEDDING_BASE_URL` | `http://localhost:11434` | Ollama base URL |
+| `EMBEDDING_MODEL` | `qwen3-embedding:0.6b` | Embedding model name |
+| `EMBEDDING_DIMENSIONS` | `1024` | Vector dimensions; must match schema column |
+| `EMBEDDING_BATCH_SIZE` | `16` | Chunks sent per embedding request |
+| `EMBEDDING_MAX_INPUT_CHARS` | `100000` | Max text length accepted per chunk |
+| `EMBEDDING_WORKER_CONCURRENCY` | `1` | Embedding worker concurrency |
+| `EMBEDDING_REQUEST_TIMEOUT_MS` | `120000` | Ollama request timeout |
+| `HYBRID_SEARCH_VECTOR_LIMIT` | `20` | Candidate count from vector search |
+| `HYBRID_SEARCH_KEYWORD_LIMIT` | `20` | Candidate count from keyword search |
+| `HYBRID_SEARCH_DEFAULT_LIMIT` | `10` | Default result count |
+| `HYBRID_SEARCH_RRF_K` | `60` | RRF rank constant |
+| `LLM_PROVIDER` | `gemini` | Only `gemini` is currently accepted |
+| `LLM_API_KEY` | empty | Gemini key; required for Q&A |
+| `LLM_MODEL` | `gemini-3.8-flash` | Configured Gemini model ID |
+| `LLM_MAX_OUTPUT_TOKENS` | `1500` | Generation output limit |
+| `LLM_REQUEST_TIMEOUT_MS` | `60000` | Gemini request timeout |
+| `RAG_RETRIEVAL_LIMIT` | `10` | Chunks retrieved for an answer |
+| `RAG_MAX_CONTEXT_TOKENS` | `12000` | Approximate evidence context budget |
+| `RAG_MAX_QUESTION_LENGTH` | `2000` | Maximum question length |
+| `RAG_ENABLE_STREAMING` | `true` | Enable SSE answer requests |
+| `VITE_API_BASE_URL` | `http://localhost:3000` | Frontend API origin |
 
-Parsing jobs, chunks, and per-file outcomes are stored in PostgreSQL. Chunks belong to a parsing job. Re-indexing versions the file inventory so old parsed chunks survive until a replacement parse commits; retrying the same parsing job removes and rewrites only its own chunks. Tree-sitter recovers nodes from malformed files, and individual read/parse failures are recorded while processing continues. After chunk and file outcomes persist and the job reaches a completed terminal state with no failed files, the worker removes older inventory versions in the same database transaction and then removes the retained clone through the existing safe storage-root cleanup function. Failed file reads preserve the older results and retained clone for retry. Use the same `INDEXING_REPOSITORY_STORAGE_DIR` setting as Phase 3. The runtime and grammar packages are `tree-sitter` 0.21.1, `tree-sitter-javascript` 0.23.1, `tree-sitter-typescript` 0.23.2, and `tree-sitter-python` 0.23.4.
+The `.env.example` files and `src/config/env.js` are authoritative. The sample also contains `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and optional `POSTGRES_PORT` / `REDIS_PORT` values used by Docker Compose.
 
-Run parser tests with `npm test`. Apply schema changes with `npm run db:deploy` in deployed environments or `npm run db:migrate` locally; no database reset is required.
+## API reference
 
-## Phase 6: grounded codebase question answering
+All routes are prefixed with `/api`. Unless noted, API endpoints require a valid CodeCompass session cookie and enforce repository ownership. State-changing requests require the configured frontend `Origin`. JSON errors use `{ "error": { "code": "...", "message": "..." } }`.
 
-`POST /api/repositories/{repositoryId}/ask` accepts `{ "question": "...", "stream": false }`. It requires the existing session cookie and the configured frontend `Origin`. The endpoint reuses Phase 5 hybrid retrieval, then sends only the ranked source chunks that fit the configured context budget to Gemini. It validates returned citation IDs against those retrieved chunks and constructs paths, line ranges, and source from the stored chunk metadata. No conversation history is persisted; every question is stateless and retrieves fresh evidence.
+### Health
 
-Configure `LLM_PROVIDER=gemini`, `LLM_API_KEY`, `LLM_MODEL=gemini-3.8-flash`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_REQUEST_TIMEOUT_MS`, and the `RAG_*` limits in `.env`. The Gemini key stays on the backend and is never returned to the client. Set `RAG_ENABLE_STREAMING=true` to allow `stream: true`; that request returns SSE events named `start`, `token`, `citations`, `complete`, and `error`. Citations and source locations are sent only after evidence-ID validation.
+| Method | Path | Auth | Purpose |
+|---|---|---:|---|
+| `GET` | `/health` | No | Liveness: API process responds |
+| `GET` | `/ready` | No | Checks database and Redis readiness |
 
-Answer requests send the user's question and retrieved repository source code to Google's hosted Gemini API. Do not use this feature with confidential, private, proprietary, credential-containing, or otherwise sensitive repository content. Gemini free-tier eligibility and quotas can change; check Google's current [Gemini API pricing and limits](https://ai.google.dev/gemini-api/docs/pricing) and do not assume unlimited free usage. The selected model's context limits are documented in Google's [Gemini 3.8 Flash model reference](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash).
+### Authentication
 
-## Phase scope
+| Method | Path | Auth | Purpose |
+|---|---|---:|---|
+| `GET` | `/auth/github` | No | Start GitHub OAuth; browser navigation |
+| `GET` | `/auth/github/callback` | OAuth state | OAuth callback; sets session and redirects |
+| `GET` | `/auth/me` | Yes | Return current signed-in user |
+| `POST` | `/auth/logout` | Origin | Clear session cookie |
 
-Phase 1 health/readiness and infrastructure behavior remains available. Phase 2 adds GitHub OAuth, persistent users, cookie sessions, URL validation, public repository metadata import, and user-scoped listing. Phase 3 adds background shallow cloning and persistent file inventory. Phase 4 adds AST parsing and code chunk persistence. Phase 5 adds local embeddings and hybrid retrieval. Phase 6 adds stateless Gemini-backed, evidence-grounded question answering. Phase 7 adds authenticated repository graph, parsed-source, and structured static-analysis guide APIs; the frontend explorer is maintained in the separate frontend repository.
-# Phase 7 code graph and source navigation APIs
+### Repositories and processing
 
-All endpoints below require the existing authenticated session cookie and verify that the repository is imported by the signed-in user. They use the latest completed indexing job and its latest parsing job. Responses report `not_indexed`, `indexing`, `not_parsed`, `parsing`, `failed`, or `stale` until matching analysis is available.
+| Method | Path | Auth | Purpose |
+|---|---|---:|---|
+| `POST` | `/repositories/import` | Yes + Origin | Import public GitHub URL and automatically queue indexing |
+| `GET` | `/repositories` | Yes | List repositories imported by current user |
+| `DELETE` | `/repositories/:repositoryId` | Yes + Origin | Remove user's import; deletes shared processing data if last owner |
+| `POST` | `/repositories/:repositoryId/index` | Yes + Origin | Start/retry indexing; returns `202` for newly queued, `200` when already active |
+| `GET` | `/repositories/:repositoryId/indexing-status` | Yes | Return latest indexing/parsing/embedding stage summaries |
+| `GET` | `/indexing-jobs/:jobId` | Yes | Read an owned indexing job |
+| `POST` | `/repositories/:repositoryId/parse` | Yes + Origin | Start or retry parsing |
+| `GET` | `/parsing-jobs/:jobId` | Yes | Read parsing progress |
+| `POST` | `/repositories/:repositoryId/embeddings` | Yes + Origin | Start embedding generation for available parse |
+| `GET` | `/embedding-jobs/:jobId` | Yes | Read embedding progress |
+| `GET` | `/embeddings/health` | Yes | Check configured Ollama embedding service/model availability |
 
-## `GET /api/repositories/:repositoryId/graph`
+### Search, Q&A, and explorer
 
-Returns graph data derived from current `RepositoryFile` and `CodeChunk` records. Supported nodes are `file`, `function`, `class`, `variable`, and `import` (the types emitted by the current AST parser). Supported edges are `CONTAINS` and `IMPORTS`. `CONTAINS` uses AST line ranges; `IMPORTS` is returned only when a module path resolves unambiguously to an indexed file. The current parser does not provide call, export, inheritance, or implementation relationships, so these are listed as unsupported in metadata and are not fabricated.
+| Method | Path | Auth | Purpose |
+|---|---|---:|---|
+| `POST` | `/repositories/:repositoryId/search` | Yes + Origin | Hybrid vector/keyword search |
+| `POST` | `/repositories/:repositoryId/ask` | Yes + Origin | RAG question answering; JSON or SSE |
+| `GET` | `/repositories/:repositoryId/graph` | Yes | Repository graph from latest parse |
+| `GET` | `/repositories/:repositoryId/reading-guide` | Yes | Static-analysis onboarding guide |
+| `GET` | `/repositories/:repositoryId/reading-progress` | Yes | Read user's guide progress |
+| `PUT` | `/repositories/:repositoryId/reading-progress` | Yes + Origin | Save progress for current parsing snapshot |
+| `GET` | `/repositories/:repositoryId/source` | Yes | Read parsed chunk snippets by file/line/symbol/chunk |
 
-Edge confidence is represented by `certainty`, `isInferred`, and source `evidence`. Direct parser-backed relationships use `certainty: "high"` and `isInferred: false`; the API does not invent numeric confidence scores. Graph generation is bounded to 1,000 files and 5,000 chunks. If either bound is exceeded, `metadata.truncated` is true and `metadata.isComplete` is false. `metadata.modules` groups files by their indexed directory paths (at a depth that keeps the summary readable) and reports resolved direct import dependencies between groups; it does not assign semantic roles to folders.
+### Selected request and response shapes
 
-## `GET /api/repositories/:repositoryId/source?filePath=src%2Fapp.js&startLine=1&endLine=40&symbolName=boot`
+**Import** — request `{ "url": "https://github.com/owner/repository" }`. Returns `success`, import status, repository metadata, and processing state where applicable.
 
-`filePath` is required and must be a repository-relative path from the current indexed inventory. Optional line bounds select overlapping chunks; `symbolName` selects an exact symbol; `chunkId` selects one database-resolved chunk and is suitable for Phase 6 citations. The response includes trusted chunk IDs, source, language, and line ranges from the database. It has `contentScope: "parsed_chunks"` and `metadata.isCompleteFile: false`: Phase 4 persists AST chunks rather than full file contents, so lines outside parsed chunks cannot be served. Traversal and absolute paths are rejected. Phase 6 citations already carry chunk IDs and backend-resolved path/line metadata, and can be opened with their `filePath` and `chunkId`.
+**Search** — request `{ "query": "Where is user authentication handled?", "limit": 10 }`. Returns `{ repositoryId, query, parsingJobId, results }`; results include `chunkId`, path, language, AST structure, symbol, line range, source, and retrieval rank metadata.
 
-## `GET /api/repositories/:repositoryId/reading-guide`
+**Ask** — request `{ "question": "Where is authentication handled?", "stream": false }`. Non-streaming JSON includes `{ repositoryId, question, answer, citations, insufficientEvidence, parsingJobId }`. A citation includes its trusted `chunkId`, path, language, structure, symbol, line range, source, and explanation.
 
-Returns a deterministic `static-analysis` guide with a backward-compatible flat `recommendations` list and seven ordered `stages`: repository layout, initialization, application flow, shared code structures, data/persistence clues, dependencies, and next exploration. Stage items carry explanations, evidence certainty, source availability, graph links, prerequisites, and expected outcomes. Filename and directory clues are labeled as heuristics; direct resolved imports are parser-backed, but do not prove runtime execution order. The response includes analysis coverage and the indexing/parsing job IDs so clients can persist manual progress against a specific parse snapshot.
+**Graph** — status may be `not_indexed`, `indexing`, `not_parsed`, `parsing`, `failed`, `stale`, or ready. Ready responses include nodes, edges, module groups, support metadata, and truncation/completeness metadata.
 
-## Reading guide progress
+**Source** — requires `filePath`; optional query parameters include `startLine`, `endLine`, `symbolName`, and `chunkId`. Returns `{ repositoryId, filePath, contentScope: "parsed_chunks", chunks, metadata }`; `metadata.isCompleteFile` is false because the API retains parsed chunks rather than complete source files.
 
-`GET /api/repositories/:repositoryId/reading-progress` returns the signed-in user's saved stage statuses and active stage for the current parsing job. `PUT` on the same path stores `{ "parsingJobId": "...", "activeStageId": "initialization", "statusByStage": { "repository-map": "completed" } }`. Updates require the configured frontend `Origin`, repository ownership, the current completed parse snapshot, and supported stage/status values. Progress is stored per user and repository and is treated as empty after a new parse. The additive `ReadingProgress` table is created by the Phase 7 reading-progress migration.
+## End-to-end API examples
 
-The graph and reading-guide APIs add no new environment variables. Run `npm run db:validate`, `npm run db:generate`, and backend tests with `npm test`; focused coverage is in `tests/code-explorer.test.js`.
+The examples assume the browser has already authenticated and has a session cookie. `curl` must preserve that cookie in `cookies.txt`, and state-changing calls must send the exact frontend `Origin`.
+
+### A. Import and check processing
+
+```bash
+curl -i -b cookies.txt -c cookies.txt \
+  -H 'Origin: http://localhost:5173' -H 'Content-Type: application/json' \
+  -d '{"url":"https://github.com/owner/repository"}' \
+  http://localhost:3000/api/repositories/import
+
+curl -b cookies.txt http://localhost:3000/api/repositories
+curl -b cookies.txt http://localhost:3000/api/repositories/REPOSITORY_UUID/indexing-status
+```
+
+A new import automatically queues indexing. The indexing worker records the current inventory and queues parsing after success. Check the current stage and progress with:
+
+```bash
+curl -b cookies.txt http://localhost:3000/api/repositories/REPOSITORY_UUID/indexing-status
+```
+
+The pipeline automatically queues parsing after indexing and embeddings after a successful parse. Poll the repository status response to follow each stage; if an embedding job must be explicitly (re)started, `POST /api/repositories/REPOSITORY_UUID/embeddings` returns its job ID, which can be polled at `/api/embedding-jobs/JOB_UUID`. IDs above are placeholders.
+
+### B. Search a repository
+
+```bash
+curl -b cookies.txt -H 'Origin: http://localhost:5173' \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"Where is user authentication handled?","limit":10}' \
+  http://localhost:3000/api/repositories/REPOSITORY_UUID/search
+```
+
+Each result includes the matching `chunkId`, `filePath`, line bounds, source, and vector/keyword ranks plus RRF metadata. Search requires embeddings for the current parse.
+
+### C. Ask a repository question
+
+```bash
+curl -b cookies.txt -H 'Origin: http://localhost:5173' \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Where is authentication handled?","stream":false}' \
+  http://localhost:3000/api/repositories/REPOSITORY_UUID/ask
+```
+
+The backend embeds the question, retrieves code, sends selected evidence to Gemini, validates source references, then returns the answer and citations. For `"stream":true`, the response is an SSE event stream rather than JSON.
+
+## Testing and troubleshooting
+
+### Tests and useful commands
+
+Backend (from `codecompass-backend`):
+
+```bash
+npm test
+npm run test:ollama  # optional live integration; requires Ollama and configured model
+npm run db:validate
+npm run db:generate
+npm run db:status
+```
+
+Frontend (from `codecompass-frontend`):
+
+```bash
+npm test
+npm run build
+npm run preview
+```
+
+The regular test suites mock external providers; the Ollama integration test requires the real service. There is no single integrated end-to-end test suite configured in the repositories.
+
+### Common issues
+
+| Symptom | Checks |
+|---|---|
+| Sign-in fails or `OAUTH_CONFIGURATION_ERROR` | Configure GitHub client ID/secret, exact callback URL, and `SESSION_SECRET`; restart backend |
+| CORS or `ORIGIN_FORBIDDEN` | Match `FRONTEND_URL` to the exact browser origin and use it as `Origin` |
+| Repository remains queued/processing | Confirm Redis is healthy and that `npm run dev` (or the relevant worker commands) is running; inspect worker terminal output and persisted job status |
+| Parsing or embeddings stay at zero | Ensure parsing and embedding workers are running; unified backend `npm run dev` now starts all workers. Verify the prior stage completed and inspect its job status |
+| Ollama unavailable/model missing | Start Ollama, check `EMBEDDING_BASE_URL`, and pull the configured model |
+| Q&A provider unavailable | Check `LLM_API_KEY`, configured model, network access, provider quota, and backend logs; the browser receives safe errors, not secrets |
+| Prisma reports a missing column | Apply committed migrations with `npm run db:deploy`, then regenerate Prisma client if needed |
+| Stale or partial explorer graph | Check whether indexing/parsing completed for the current snapshot; partial parse and graph limits are reported by the API |
+| Cookie/session not recognized | Keep frontend and backend on consistent hostnames and inspect browser cookie policy |
+
+Use `docker compose up -d` to start dependencies and `docker compose ps` to inspect service health. `npm run db:deploy` applies migrations without resetting data. Avoid `docker compose down -v` unless you explicitly intend to delete the PostgreSQL volume and all local database data.
+
+## Security and privacy
+
+- GitHub access is OAuth-based. The backend uses the GitHub token for profile/repository metadata operations and does not persist it after profile lookup.
+- The CodeCompass session is stored in an HTTP-only cookie; the frontend does not keep session tokens in local storage.
+- Repository routes check that the signed-in user imported the repository. Shared repository data remains while another user still has an import.
+- CORS, same-origin checks, request validation, auth/import rate limits, and safe API error messages are implemented.
+- The source clone is retained under the configured repository storage directory so parsing can read it. Repository deletion removes shared data and retained storage when the last import is removed.
+- Ollama receives code text for embedding generation and natural-language queries for search. It is configured as a local service by default.
+- Gemini receives the user's question and selected retrieved code chunks. Avoid confidential, proprietary, credential-containing, or otherwise sensitive repositories. Keep `LLM_API_KEY` in the backend environment only.
+- Code is treated as untrusted evidence in the RAG prompt. Citations are checked against the retrieved source set before the API returns them. This grounding reduces unsupported answers but does not guarantee correctness or eliminate prompt-injection risk.
+- Do not commit `.env` files, OAuth credentials, session secrets, or provider API keys. Production deployments should use HTTPS and a managed secret store.
+
+## Deployment considerations
+
+The repositories provide local development configuration, backend startup scripts, migrations, and Docker Compose for PostgreSQL and Redis. A production deployment topology is not defined by the codebase. Treat any deployment plan as an operator responsibility, not an already deployed feature.
+
+A production setup needs durable PostgreSQL storage with pgvector, Redis reachable by the API and workers, persistent clone storage accessible to the parsing worker, an Ollama service with the configured model, and network access from the backend to Gemini. BullMQ workers need a persistent process runtime; a request-only/serverless process will not reliably drain queues. Keep databases, Redis, Ollama, clone storage, and secrets private. Use HTTPS, restrict inbound access, back up persistent data, and configure resource limits appropriate to repository clone and parsing work. The current configuration assumes API and workers can access the same repository storage path.
+
+## Limitations and future improvements
+
+### Current limitations
+
+- Only public GitHub repositories can be imported.
+- Tree-sitter extraction is currently configured for JavaScript, TypeScript, and Python.
+- Graph edges cover contained AST structures and unambiguous imports; calls and runtime behavior are not analyzed.
+- The source endpoint serves parsed chunks, not complete source files.
+- Static guide clues may be heuristic and do not establish runtime execution order.
+- Graph generation is bounded to 1,000 files and 5,000 chunks.
+- Q&A depends on a configured Gemini API and provider availability/quota; embeddings/search depend on local Ollama.
+- Q&A conversations are not persisted; guide progress is persisted against a parsing snapshot.
+
+### Future improvements
+
+Possible future work includes private repository access, additional language grammars, stronger call graph resolution, incremental parsing, repository version history, persistent Q&A sessions, team collaboration, and additional embedding or answer providers. These are ideas only; they are not described as implemented features.
+
+## Contributing
+
+1. Set up PostgreSQL, Redis, Ollama, backend environment variables, and the frontend as described above.
+2. Keep backend changes in the backend repository and frontend changes in the frontend repository.
+3. Run the relevant test suite (`npm test`) and backend schema validation for database changes.
+4. For Prisma changes, create a migration with the project workflow, review its SQL, and commit the migration with the schema update. Use `npm run db:deploy` to apply committed migrations locally.
+5. Add API routes through the existing router/controller/service layers and preserve authentication, ownership checks, origin checks, and response envelopes.
+6. Add workers through BullMQ queues and persisted job state; document required environment variables and recovery behavior.
+7. Never commit secrets or repository source fixtures containing sensitive data. Keep documentation claims aligned with implemented behavior.
+
+## Repository layout
+
+```text
+codecompass-backend/
+├── prisma/                 # Prisma schema and migrations
+├── src/
+│   ├── controllers/        # HTTP request/response handlers
+│   ├── routes/             # Express route registration
+│   ├── services/           # OAuth, indexing, parsing, search, RAG, explorer logic
+│   ├── workers/            # BullMQ worker entry points
+│   ├── middleware/         # Authentication, origin, and error handling
+│   └── lib/                # Prisma, Redis, sessions, and queues
+├── tests/                  # Backend unit and route tests
+└── docs/images/            # Product screenshots used above
+
+codecompass-frontend/
+└── src/
+    ├── components/         # Repository cards, Q&A, graph, guide, source viewer
+    ├── context/            # Authentication context
+    ├── pages/              # Landing, dashboard, and repository explorer
+    └── services/            # Credentialed API client
+```
+
+## Implementation accuracy
+
+This guide describes the implementation inspected in the backend and frontend source, their environment examples, Prisma schema/migrations, and test suites. The production deployment section is explicitly guidance, and the future-improvements list is explicitly proposed work. No deployment provider or production topology is claimed to exist.
