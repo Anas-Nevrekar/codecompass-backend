@@ -2,7 +2,7 @@ const DEFAULTS = {
   NODE_ENV: 'development',
   PORT: '3000',
   FRONTEND_URL: 'http://localhost:5173',
-  DATABASE_URL: 'postgresql://postgres:postgres@localhost:5432/codecompass',
+  DATABASE_URL: 'postgresql://localhost:5432/codecompass',
   REDIS_URL: 'redis://localhost:6379',
   GITHUB_CLIENT_ID: '',
   GITHUB_CLIENT_SECRET: '',

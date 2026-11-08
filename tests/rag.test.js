@@ -236,7 +236,7 @@ test('ask API reports LLM timeouts as an SSE error instead of ending silently', 
 });
 
 test('ask API logs sanitized original provider diagnostics for non-streaming failures', async () => {
-  const apiKey = 'AIza_TEST_SECRET_12345678901234567890';
+  const apiKey = 'synthetic-test-api-key-not-a-credential';
   const config = validateEnv({ NODE_ENV: 'test', SESSION_SECRET: secret, LLM_API_KEY: apiKey });
   const llmService = createGeminiLlmService({ config: config.llm, client: { models: { async generateContent() {
     const error = new Error(`Invalid API key ${apiKey}`);

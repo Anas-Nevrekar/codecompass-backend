@@ -1,7 +1,27 @@
 # Secrets and local configuration
-.env
-.env.*
-!.env.example
+.env*
+**/.env*
+.aws/
+**/.aws/
+.ssh/
+**/.ssh/
+secrets/
+**/secrets/
+.npmrc
+**/.npmrc
+.netrc
+**/.netrc
+.git-credentials
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+*.cer
+*credentials*.json
+service-account*.json
 
 # Dependencies and source control
 node_modules

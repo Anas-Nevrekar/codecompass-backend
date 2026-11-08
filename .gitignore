@@ -6,3 +6,26 @@ node_modules/
 coverage/
 npm-debug.log*
 .DS_Store
+
+# Credentials and local secret material
+.aws/
+**/.aws/
+.ssh/
+**/.ssh/
+secrets/
+**/secrets/
+.npmrc
+**/.npmrc
+.netrc
+**/.netrc
+.git-credentials
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+*.cer
+*credentials*.json
+service-account*.json
